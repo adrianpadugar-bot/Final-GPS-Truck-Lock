@@ -381,50 +381,48 @@ let state = {
   dashboardDestFilter: null
 };
 
-/* ---------------- Storage helpers ----------------
-   Prefers window.storage (syncs across everyone using this file inside
-   Claude's artifact panel). If that API isn't present — e.g. the file was
-   downloaded and opened directly in a browser, or hosted elsewhere — it
-   falls back to the browser's own localStorage so uploads still survive
-   a refresh or logout/login. localStorage in that fallback case is only
-   local to that one browser, not shared between different computers. */
-const LS_PREFIX = 'sealtrack_';
-const hasCloudStorage = () => (typeof window !== 'undefined' && !!window.storage && typeof window.storage.get === 'function');
+// Initialize Firebase using your project details
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY", // Get this from your Firebase Project Settings
+  authDomain: "truck-lock-1ed79.firebaseapp.com",
+  projectId: "truck-lock-1ed79",
+  storageBucket: "truck-lock-1ed79.firebasestorage.app",
+  messagingSenderId: "899624941836",
+  appId: "YOUR_APP_ID" // Get this from your Firebase Project Settings
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
 
-async function storageGet(key){
-  if(hasCloudStorage()){
-    try{
-      const r = await window.storage.get(key, true);
-      return r ? JSON.parse(r.value) : null;
-    }catch(e){ return null; } // key not yet created
-  }
-  try{
+const LS_PREFIX = 'sealtrack_';
+
+async function storageGet(key) {
+  const docName = key.replace(':', '_');
+  try {
+    const docRef = db.collection('sealtrack').doc(docName);
+    const docSnap = await docRef.get();
+    return docSnap.exists ? docSnap.data().value : null;
+  } catch (e) {
+    // Graceful offline fallback to LocalStorage
     const v = localStorage.getItem(LS_PREFIX + key);
     return v ? JSON.parse(v) : null;
-  }catch(e){ return null; }
+  }
 }
-async function storageSet(key, val){
-  if(hasCloudStorage()){
-    try{
-      await window.storage.set(key, JSON.stringify(val), true);
+
+async function storageSet(key, val) {
+  const docName = key.replace(':', '_');
+  try {
+    await db.collection('sealtrack').doc(docName).set({ value: val });
+    return true;
+  } catch (e) {
+    try {
+      localStorage.setItem(LS_PREFIX + key, JSON.stringify(val));
       return true;
-    }catch(e){
-      // fall through and try a local backup so the edit isn't lost
+    } catch (err) {
+      pushToast('Could not save changes.', 'err');
+      return false;
     }
   }
-  try{
-    localStorage.setItem(LS_PREFIX + key, JSON.stringify(val));
-    return true;
-  }catch(e){
-    pushToast('Could not save changes — your browser storage may be full or blocked.', 'err');
-    return false;
-  }
 }
-
-function genId(prefix){
-  return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2,7);
-}
-
 function nowStamp(){
   const d = new Date();
   return d.toISOString();
