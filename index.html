@@ -304,6 +304,13 @@ tbody tr:hover{background:#FAFBFD;}
 .assign-info{margin-top:12px;padding:10px 12px;border-radius:8px;background:var(--surface-2);font-size:12.5px;}
 .step-n{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:var(--navy-3);color:#fff;font-size:11px;font-weight:700;margin-right:6px;}
 
+.mod-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px;}
+.mod-opt{display:flex;align-items:center;gap:9px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:13px;cursor:pointer;margin:0;text-transform:none;letter-spacing:0;font-weight:500;color:var(--text);}
+.mod-opt input{width:auto;margin:0;}
+.mod-opt.is-off{opacity:0.45;cursor:not-allowed;}
+.mod-mini{display:flex;flex-wrap:wrap;gap:4px;max-width:360px;}
+.mod-mini .chip{padding:2px 8px;font-size:11.5px;}
+
 /* ---------- Toast ---------- */
 .toast-stack{position:fixed;bottom:22px;right:22px;z-index:200;display:flex;flex-direction:column;gap:8px;}
 .toast{
@@ -528,6 +535,24 @@ function allDestinations(){
   state.allocations.forEach(a=>a.destination && set.add(a.destination));
   return Array.from(set).sort((a,b)=>a.localeCompare(b));
 }
+// Modules an account can be granted. Master Data and Users & Settings are admin-only.
+const MODULES = [
+  {id:'dashboard',  label:'Dashboard',            icon:ICONS.dash},
+  {id:'locks',      label:'Truck Lock Assigning', icon:ICONS.lock},
+  {id:'return',     label:'Return to Origin',     icon:ICONS.ret},
+  {id:'allocation', label:'Allocation',           icon:ICONS.alloc},
+  {id:'master',     label:'Master Data',          icon:ICONS.route, adminOnly:true},
+  {id:'settings',   label:'Users & Settings',     icon:ICONS.users, adminOnly:true}
+];
+function defaultModulesFor(role){
+  return role==='admin' ? MODULES.map(m=>m.id) : MODULES.filter(m=>!m.adminOnly).map(m=>m.id);
+}
+function userModules(u){
+  if(!u) return [];
+  const base = Array.isArray(u.modules) ? u.modules : defaultModulesFor(u.role);
+  return MODULES.filter(m=>base.includes(m.id) && !(m.adminOnly && u.role!=='admin')).map(m=>m.id);
+}
+function modLabel(id){ const m = MODULES.find(x=>x.id===id); return m ? m.label : id; }
 function allOrigins(){
   const set = new Set();
   state.routes.forEach(r=>r.origin && set.add(r.origin));
@@ -546,11 +571,20 @@ function lockTableBase(){
   const all = visibleLocksBase();
   return state.filters.status==='available' ? all : all.filter(l=>l.status!=='available');
 }
+function sameStr(a,b){ const x=String(a==null?'':a).trim().toLowerCase(); return x!=='' && x===String(b==null?'':b).trim().toLowerCase(); }
+function isOriginStaff(){ return !!state.currentUser && state.currentUser.role==='origin'; }
+function isDestStaff(){ return !!state.currentUser && state.currentUser.role==='destination'; }
+function scopeName(u){ return u ? (u.role==='origin' ? (u.origin||'') : (u.destination||'')) : ''; }
+// Origin staff only handle locks that came from their origin.
+function canArriveLock(l){
+  if(!l || l.status!=='returning') return false;
+  return state.currentUser.role==='admin' || (isOriginStaff() && sameStr(l.origin, state.currentUser.origin));
+}
 function visibleLocksBase(){
   // scope by role
-  if(state.currentUser && state.currentUser.role === 'destination'){
-    return state.locks.filter(l => l.destination === state.currentUser.destination);
-  }
+  const u = state.currentUser;
+  if(u && u.role === 'destination') return state.locks.filter(l => l.destination === u.destination);
+  if(u && u.role === 'origin') return state.locks.filter(l => sameStr(l.origin, u.origin));
   return state.locks;
 }
 function applyFilters(list){
@@ -649,15 +683,12 @@ function handleLogout(){
 /* ---------------- Shell (post-login) ---------------- */
 function renderShell(){
   const isAdmin = state.currentUser.role === 'admin';
-  const tabs = [
-    {id:'dashboard', label:'Dashboard', icon:ICONS.dash},
-    {id:'locks', label: isAdmin ? 'Truck Lock Assigning' : 'My Truck Locks', icon:ICONS.lock},
-  ];
-  tabs.push({id:'return', label:'Return to Origin', icon:ICONS.ret});
-  tabs.push({id:'allocation', label:'Allocation', icon:ICONS.alloc});
-  if(isAdmin) tabs.push({id:'master', label:'Master Data', icon:ICONS.route});
-  if(isAdmin) tabs.push({id:'settings', label:'Users & Settings', icon:ICONS.users});
-  if(!isAdmin) tabs.push({id:'account', label:'My Account', icon:ICONS.users});
+  const allowedMods = userModules(state.currentUser);
+  const tabs = MODULES.filter(m=>allowedMods.includes(m.id)).map(m=>({
+    id:m.id, icon:m.icon,
+    label: m.id==='locks' ? (isAdmin ? 'Truck Lock Assigning' : 'My Truck Locks') : m.label
+  }));
+  if(!allowedMods.includes('settings')) tabs.push({id:'account', label:'My Account', icon:ICONS.users});
 
   return `
   <div class="shell">
@@ -669,7 +700,7 @@ function renderShell(){
       <div class="sb-footer">
         <div class="sb-user">
           <b>${escapeHtml(state.currentUser.username)}</b>
-          ${isAdmin ? '<span class="tag-pill tag-admin">Admin</span>' : `<span class="tag-pill tag-dest">${escapeHtml(state.currentUser.destination||'—')}</span>`}
+          ${isAdmin ? '<span class="tag-pill tag-admin">Admin</span>' : `<span class="tag-pill tag-dest">${escapeHtml(scopeName(state.currentUser)||'—')}</span>`}
         </div>
         <button class="nav-item" onclick="handleLogout()">${ICONS.logout}<span>Log out</span></button>
       </div>
@@ -681,6 +712,8 @@ function renderShell(){
 }
 
 function setTab(tab){
+  const allowed = userModules(state.currentUser);
+  if(tab!=='account' && !allowed.includes(tab)) return;
   state.activeTab = tab;
   state.selected = new Set();
   state.exportMenuOpen = null;
@@ -688,6 +721,13 @@ function setTab(tab){
 }
 
 function renderTab(){
+  const allowed = userModules(state.currentUser);
+  const t = state.activeTab;
+  const ok = t==='account' ? !allowed.includes('settings') : allowed.includes(t);
+  if(!ok){
+    state.activeTab = allowed[0] || 'account';
+    if(!allowed.length) return `<div class="panel">${emptyState('No modules assigned', 'Ask an admin to give your account access to a module.')}</div>`;
+  }
   switch(state.activeTab){
     case 'dashboard': return renderDashboard();
     case 'locks': return renderLocksTab();
@@ -790,7 +830,7 @@ function renderDashboard(){
   scoped.filter(l=>l.status==='assigned' && l.destination).forEach(l=>{
     const g = aGet(l.destination); g.n++; agGet(g, l.agency||'—').n++;
   });
-  state.allocations.filter(a=>isAdmin || a.destination===state.currentUser.destination).forEach(a=>{
+  state.allocations.filter(a=>isAdmin || (isOriginStaff() ? sameStr(a.origin,state.currentUser.origin) : a.destination===state.currentUser.destination)).forEach(a=>{
     const left = Math.max(a.qty - allocUsedCount(a.destination, a.agency), 0);
     const g = aGet(a.destination); g.left += left; agGet(g, a.agency).left += left;
   });
@@ -824,7 +864,7 @@ function renderDashboard(){
     <div class="topbar">
       <div>
         <h1 class="page-title">Dashboard</h1>
-        <p class="page-sub">${isAdmin? 'Fleet-wide overview of every truck lock.' : `Overview for ${escapeHtml(state.currentUser.destination||'')}.`}</p>
+        <p class="page-sub">${isAdmin? 'Fleet-wide overview of every truck lock.' : `Overview for ${escapeHtml(scopeName(state.currentUser))}${isOriginStaff()?' (origin)':''}.`}</p>
       </div>
     </div>
     <div class="grid-cards">
@@ -869,21 +909,21 @@ function renderLocksTab(){
   const isAdmin = state.currentUser.role === 'admin';
   const base = lockTableBase();
   const list = applyFilters(base);
-  const dests = isAdmin ? allDestinations() : [state.currentUser.destination];
+  const dests = isAdmin ? allDestinations() : Array.from(new Set(visibleLocksBase().map(l=>l.destination).filter(Boolean))).sort();
   const agencies = allAgencies();
 
   const selectedLocks = base.filter(l=>state.selected.has(l.id));
   const canMarkReceived = selectedLocks.length>0 && selectedLocks.every(l=>l.status==='assigned') &&
-    (isAdmin || selectedLocks.every(l=>l.destination===state.currentUser.destination));
+    (isAdmin || (isDestStaff() && selectedLocks.every(l=>l.destination===state.currentUser.destination)));
   const canUnassign = isAdmin && selectedLocks.length>0 && selectedLocks.every(l=>l.status!=='available');
   const canDelete = isAdmin && selectedLocks.length>0;
-  const canArrive = isAdmin && selectedLocks.length>0 && selectedLocks.every(l=>l.status==='returning');
+  const canArrive = selectedLocks.length>0 && selectedLocks.every(canArriveLock);
 
   return `
     <div class="topbar">
       <div>
         <h1 class="page-title">${isAdmin?'Truck Lock Assigning':'My Truck Locks'}</h1>
-        <p class="page-sub">${isAdmin? 'Pick a destination, agency and lock number to assign a truck lock, then track it below.' : `Locks assigned to ${escapeHtml(state.currentUser.destination||'')}.`}</p>
+        <p class="page-sub">${isAdmin? 'Pick a destination, agency and lock number to assign a truck lock, then track it below.' : `${isOriginStaff() ? 'Locks from' : 'Locks assigned to'} ${escapeHtml(scopeName(state.currentUser))}.`}</p>
       </div>
       <div class="action-row">
         ${isAdmin ? `<button class="btn btn-ghost" onclick="openModal('bulkLocks')">＋ Bulk upload locks</button>` : ''}
@@ -957,8 +997,8 @@ function renderLocksTab(){
                 <td>${l.receivedAt?fmtDate(l.receivedAt):'—'}</td>
                 <td>
                   <div class="action-row">
-                    ${l.status==='assigned' && (isAdmin || l.destination===state.currentUser.destination) ? `<button class="btn btn-success btn-sm" onclick="markReceived('${l.id}')">Mark received</button>` : ''}
-                    ${isAdmin && l.status==='returning' ? `<button class="btn btn-success btn-sm" onclick="arriveAtOrigin('${l.id}')">Back at origin</button>` : ''}
+                    ${l.status==='assigned' && (isAdmin || (isDestStaff() && l.destination===state.currentUser.destination)) ? `<button class="btn btn-success btn-sm" onclick="markReceived('${l.id}')">Mark received</button>` : ''}
+                    ${canArriveLock(l) ? `<button class="btn btn-success btn-sm" onclick="arriveAtOrigin('${l.id}')">Back at origin</button>` : ''}
                     ${isAdmin && l.status!=='available' ? `<button class="btn btn-ghost btn-sm" onclick="unassignLock('${l.id}')">Release</button>` : ''}
                     ${isAdmin ? `<button class="btn btn-ghost btn-sm" onclick="openModal('editLock', ['${l.id}'])">Edit</button>` : ''}
                     ${isAdmin ? `<button class="btn btn-danger btn-sm" onclick="deleteLock('${l.id}')">Delete</button>` : ''}
@@ -1015,6 +1055,7 @@ function clearSelection(){ state.selected = new Set(); render(); }
 async function markReceived(id){
   const lock = state.locks.find(l=>l.id===id);
   if(!lock) return;
+  if(!(state.currentUser.role==='admin' || (isDestStaff() && lock.destination===state.currentUser.destination))){ pushToast("You can't mark this lock as received.", 'err'); return; }
   lock.status = 'received';
   lock.receivedAt = nowStamp();
   await storageSet('st:locks', state.locks);
@@ -1035,7 +1076,7 @@ async function bulkMarkReceived(){
 }
 function canReturnLock(l){
   if(!l || l.status!=='received') return false;
-  return state.currentUser.role==='admin' || l.destination===state.currentUser.destination;
+  return state.currentUser.role==='admin' || (isDestStaff() && l.destination===state.currentUser.destination);
 }
 async function returnToOrigin(id){
   const l = state.locks.find(x=>x.id===id);
@@ -1063,14 +1104,14 @@ function backToStock(l){
 }
 async function arriveAtOrigin(id){
   const l = state.locks.find(x=>x.id===id);
-  if(!l || l.status!=='returning') return;
+  if(!canArriveLock(l)){ pushToast("You can't confirm this lock back at origin.", 'err'); return; }
   backToStock(l);
   await storageSet('st:locks', state.locks);
   pushToast(`Lock ${l.lockNo} is back at origin and available.`, 'ok');
   render();
 }
 async function bulkArriveAtOrigin(){
-  const sel = state.locks.filter(l=>state.selected.has(l.id) && l.status==='returning');
+  const sel = state.locks.filter(l=>state.selected.has(l.id) && canArriveLock(l));
   if(!sel.length) return;
   sel.forEach(backToStock);
   await storageSet('st:locks', state.locks);
@@ -1253,6 +1294,7 @@ function returnableLocks(){
 function setReturnLock(id){ state.returnForm.lockId = id; render(); }
 function renderReturnTab(){
   const isAdmin = state.currentUser.role === 'admin';
+  const canAct = isAdmin || isOriginStaff();
   const f = state.returnForm;
   const locks = returnableLocks();
   if(f.lockId && !locks.some(l=>l.id===f.lockId)) f.lockId = '';
@@ -1264,10 +1306,10 @@ function renderReturnTab(){
     <div class="topbar">
       <div>
         <h1 class="page-title">Return to Origin</h1>
-        <p class="page-sub">${isAdmin ? 'Pick a lock number received by a destination to send it back to its origin.' : `Send locks received at ${escapeHtml(state.currentUser.destination||'your destination')} back to their origin.`}</p>
+        <p class="page-sub">${isAdmin ? 'Pick a lock number received by a destination to send it back to its origin.' : (isOriginStaff() ? `Confirm locks that are back at ${escapeHtml(state.currentUser.origin||'your origin')}.` : `Send locks received at ${escapeHtml(state.currentUser.destination||'your destination')} back to their origin.`)}</p>
       </div>
     </div>
-    <div class="panel" style="margin-bottom:16px;">
+    ${isOriginStaff() ? '' : `<div class="panel" style="margin-bottom:16px;">
       <p class="panel-title">Return a lock</p>
       <p class="panel-sub">Only locks already received by the destination are listed, lowest serial number first.</p>
       <div class="assign-grid" style="grid-template-columns:minmax(220px,340px);">
@@ -1291,14 +1333,14 @@ function renderReturnTab(){
           ${detail('Received', sel.receivedAt?fmtDate(sel.receivedAt):'—')}
         </div>
         <div style="margin-top:14px;"><button class="btn btn-accent" onclick="submitReturnForm()">Return to origin</button></div>` : ''}
-    </div>
+    </div>`}
     <div class="panel">
       <p class="panel-title">Returning to origin</p>
-      <p class="panel-sub">Locks on their way back. ${isAdmin ? 'Mark each one once it is back at origin.' : 'An admin confirms when they are back at origin.'}</p>
+      <p class="panel-sub">Locks on their way back. ${canAct ? 'Mark each one once it is back at origin.' : 'Origin staff or an admin confirm when they are back at origin.'}</p>
       <div class="table-wrap"><table>
-        <thead><tr><th>Lock No.</th><th>Agency</th><th>Plate No.</th><th>From (destination)</th><th>To (origin)</th><th>Return started</th>${isAdmin?'<th>Actions</th>':''}</tr></thead>
+        <thead><tr><th>Lock No.</th><th>Agency</th><th>Plate No.</th><th>From (destination)</th><th>To (origin)</th><th>Return started</th>${canAct?'<th>Actions</th>':''}</tr></thead>
         <tbody>
-          ${returning.length===0 ? `<tr class="empty-row"><td colspan="${isAdmin?7:6}">${emptyState('Nothing returning', 'Locks you send back to origin will appear here.')}</td></tr>` : returning.map(l=>`
+          ${returning.length===0 ? `<tr class="empty-row"><td colspan="${canAct?7:6}">${emptyState('Nothing returning', 'Locks you send back to origin will appear here.')}</td></tr>` : returning.map(l=>`
             <tr>
               <td class="mono">${escapeHtml(l.lockNo)}</td>
               <td>${escapeHtml(l.agency||'—')}</td>
@@ -1306,7 +1348,7 @@ function renderReturnTab(){
               <td>${escapeHtml(l.destination||'—')}</td>
               <td>${escapeHtml(l.origin||'—')}</td>
               <td>${l.returnStartedAt?fmtDate(l.returnStartedAt):'—'}</td>
-              ${isAdmin ? `<td><button class="btn btn-success btn-sm" onclick="arriveAtOrigin('${l.id}')">Back at origin</button></td>` : ''}
+              ${canAct ? `<td>${canArriveLock(l) ? `<button class="btn btn-success btn-sm" onclick="arriveAtOrigin('${l.id}')">Back at origin</button>` : ''}</td>` : ''}
             </tr>`).join('')}
         </tbody>
       </table></div>
@@ -1685,7 +1727,7 @@ function renderSettingsTab(){
     <div class="topbar">
       <div>
         <h1 class="page-title">Users &amp; Settings</h1>
-        <p class="page-sub">Create per-destination logins so each site only sees its own GPS locks.</p>
+        <p class="page-sub">Create admin, destination and origin logins and choose which modules each account can access.</p>
       </div>
       <div class="action-row">
         <button class="btn btn-accent" onclick="openModal('addUser')">＋ New user</button>
@@ -1694,16 +1736,17 @@ function renderSettingsTab(){
 
     <div class="panel">
       <p class="panel-title">Accounts</p>
-      <p class="panel-sub">Admins see everything. Destination accounts only see locks assigned to their destination.</p>
+      <p class="panel-sub">Pick the modules each account can open. Destination accounts only see locks assigned to their destination, and origin accounts only see locks from their origin; Master Data and Users &amp; Settings are admin-only.</p>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Username</th><th>Role</th><th>Destination</th><th>Created</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Username</th><th>Role</th><th>Destination / Origin</th><th>Modules</th><th>Created</th><th>Actions</th></tr></thead>
           <tbody>
             ${state.users.map(u=>`
               <tr>
                 <td><b>${escapeHtml(u.username)}</b>${u.id===state.currentUser.id?' <span class="helper-text">(you)</span>':''}</td>
-                <td>${u.role==='admin'?'<span class="tag-pill tag-admin" style="color:var(--accent-dark);background:var(--accent-bg);">Admin</span>':'<span class="tag-pill" style="background:var(--slate-bg);color:var(--slate);">Destination</span>'}</td>
-                <td>${escapeHtml(u.destination||'—')}</td>
+                <td>${u.role==='admin'?'<span class="tag-pill tag-admin" style="color:var(--accent-dark);background:var(--accent-bg);">Admin</span>':(u.role==='origin'?'<span class="tag-pill" style="background:#ede9fe;color:#6d28d9;">Origin</span>':'<span class="tag-pill" style="background:var(--slate-bg);color:var(--slate);">Destination</span>')}</td>
+                <td>${escapeHtml((u.role==='origin' ? u.origin : u.destination)||'—')}</td>
+                <td>${(()=>{ const m = userModules(u); const all = MODULES.filter(x=>!(x.adminOnly && u.role!=='admin')).length; return m.length===0 ? '<span class="helper-text">None</span>' : (m.length===all ? '<span class="helper-text">All modules</span>' : `<div class="mod-mini">${m.map(id=>`<span class="chip">${escapeHtml(modLabel(id))}</span>`).join('')}</div>`); })()}</td>
                 <td>${u.createdAt?fmtDate(u.createdAt):'—'}</td>
                 <td class="action-row">
                   <button class="btn btn-ghost btn-sm" onclick="openModal('editUser', ['${u.id}'])">Edit</button>
@@ -1758,7 +1801,7 @@ function renderAccountTab(){
     <div class="topbar">
       <div>
         <h1 class="page-title">My Account</h1>
-        <p class="page-sub">Signed in as ${escapeHtml(state.currentUser.username)} · ${escapeHtml(state.currentUser.destination||'')}</p>
+        <p class="page-sub">Signed in as ${escapeHtml(state.currentUser.username)} · ${escapeHtml(scopeName(state.currentUser))}</p>
       </div>
     </div>
     ${renderMyAccountPanel()}
@@ -1774,8 +1817,9 @@ function modalAddUser(){
     </div>
     <div class="field">
       <label>Role</label>
-      <select id="newUserRole" onchange="toggleDestField(this.value,'newUserDestWrap')">
+      <select id="newUserRole" onchange="onUserRoleChange('new')">
         <option value="destination">Destination staff</option>
+        <option value="origin">Origin staff</option>
         <option value="admin">Admin</option>
       </select>
     </div>
@@ -1785,23 +1829,71 @@ function modalAddUser(){
       <datalist id="userDestList">${dests.map(d=>`<option value="${escapeHtml(d)}">`).join('')}</datalist>
       <div class="helper-text">This account will only see GPS locks assigned to this destination.</div>
     </div>
+    <div class="field" id="newUserOriginWrap" style="display:none;">
+      <label>Origin</label>
+      <input id="newUserOrigin" list="userOriginList" placeholder="e.g. Manila Port">
+      <datalist id="userOriginList">${allOrigins().map(o=>`<option value="${escapeHtml(o)}">`).join('')}</datalist>
+      <div class="helper-text">This account will only see locks from this origin and can confirm them back at origin.</div>
+    </div>
+    ${renderModulePicker('new', 'destination', defaultModulesFor('destination'))}
   `;
   const footer = `<button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-accent" onclick="submitAddUser()">Create user</button>`;
   return modalShell('Create new user', 'Give a destination its own login.', body, footer);
 }
+function renderModulePicker(prefix, role, selected){
+  return `
+    <div class="field">
+      <label>Module access</label>
+      <div class="mod-grid" id="${prefix}ModGrid">
+        ${MODULES.map(m=>{
+          const off = m.adminOnly && role!=='admin';
+          return `<label class="mod-opt ${off?'is-off':''}" id="${prefix}ModLbl_${m.id}"><input type="checkbox" id="${prefix}Mod_${m.id}" ${(!off && selected.includes(m.id))?'checked':''} ${off?'disabled':''}> ${escapeHtml(m.label)}${m.adminOnly?' <span class="helper-text">(admin only)</span>':''}</label>`;
+        }).join('')}
+      </div>
+      <div class="helper-text">Only ticked modules appear in this account's menu.</div>
+    </div>`;
+}
+function onUserRoleChange(prefix){
+  const role = document.getElementById(prefix+'UserRole').value;
+  toggleDestField(role, prefix+'UserDestWrap');
+  const ow = document.getElementById(prefix+'UserOriginWrap');
+  if(ow) ow.style.display = role==='origin' ? 'block' : 'none';
+  const defs = defaultModulesFor(role);
+  MODULES.forEach(m=>{
+    const cb = document.getElementById(prefix+'Mod_'+m.id), lbl = document.getElementById(prefix+'ModLbl_'+m.id);
+    if(!cb) return;
+    const off = m.adminOnly && role!=='admin';
+    cb.disabled = off;
+    cb.checked = !off && defs.includes(m.id);
+    if(lbl) lbl.classList.toggle('is-off', off);
+  });
+}
+function readModulePicker(prefix, role){
+  return MODULES.filter(m=>{
+    const cb = document.getElementById(prefix+'Mod_'+m.id);
+    return cb && cb.checked && !(m.adminOnly && role!=='admin');
+  }).map(m=>m.id);
+}
+// At least one admin must keep Users & Settings access, or nobody could manage accounts.
+function hasSettingsAdmin(users){
+  return users.some(x=>x.role==='admin' && userModules(x).includes('settings'));
+}
 function toggleDestField(role, wrapId){
   const el = document.getElementById(wrapId);
-  if(el) el.style.display = role==='admin' ? 'none' : 'block';
+  if(el) el.style.display = role==='destination' ? 'block' : 'none';
 }
 async function submitAddUser(){
   const username = document.getElementById('newUserName').value.trim();
   const password = document.getElementById('newUserPass').value;
   const role = document.getElementById('newUserRole').value;
   const destination = role==='destination' ? document.getElementById('newUserDest').value.trim() : null;
+  const origin = role==='origin' ? document.getElementById('newUserOrigin').value.trim() : null;
   if(!username || password.length<4){ pushToast('Username required and password should be at least 4 characters.', 'err'); return; }
   if(state.users.some(u=>u.username.toLowerCase()===username.toLowerCase())){ pushToast('That username already exists.', 'err'); return; }
   if(role==='destination' && !destination){ pushToast('Please specify a destination for this account.', 'err'); return; }
-  state.users.push({id: genId('u'), username, password, role, destination, createdAt: nowStamp()});
+  if(role==='origin' && !origin){ pushToast('Please specify an origin for this account.', 'err'); return; }
+  const modules = readModulePicker('new', role);
+  state.users.push({id: genId('u'), username, password, role, destination, origin, modules, createdAt: nowStamp()});
   await storageSet('st:users', state.users);
   closeModal();
   pushToast(`User "${username}" created.`, 'ok');
@@ -1816,18 +1908,25 @@ function modalEditUser(id){
     <div class="form-row">
       <div class="field">
         <label>Role</label>
-        <select id="editUserRole" onchange="toggleDestField(this.value,'editUserDestWrap')">
+        <select id="editUserRole" onchange="onUserRoleChange('edit')">
           <option value="destination" ${u.role==='destination'?'selected':''}>Destination staff</option>
+          <option value="origin" ${u.role==='origin'?'selected':''}>Origin staff</option>
           <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
         </select>
       </div>
       <div class="field"><label>Reset password</label><input id="editUserPass" type="password" placeholder="leave blank to keep current"></div>
     </div>
-    <div class="field" id="editUserDestWrap" style="display:${u.role==='admin'?'none':'block'};">
+    <div class="field" id="editUserDestWrap" style="display:${u.role==='destination'?'block':'none'};">
       <label>Destination</label>
       <input id="editUserDest" list="editUserDestList" value="${escapeHtml(u.destination||'')}">
       <datalist id="editUserDestList">${dests.map(d=>`<option value="${escapeHtml(d)}">`).join('')}</datalist>
     </div>
+    <div class="field" id="editUserOriginWrap" style="display:${u.role==='origin'?'block':'none'};">
+      <label>Origin</label>
+      <input id="editUserOrigin" list="editUserOriginList" value="${escapeHtml(u.origin||'')}">
+      <datalist id="editUserOriginList">${allOrigins().map(o=>`<option value="${escapeHtml(o)}">`).join('')}</datalist>
+    </div>
+    ${renderModulePicker('edit', u.role, userModules(u))}
   `;
   const footer = `<button class="btn btn-ghost" onclick="closeModal()">Cancel</button><button class="btn btn-accent" onclick="submitEditUser('${id}')">Save changes</button>`;
   return modalShell('Edit user', '', body, footer);
@@ -1838,13 +1937,21 @@ async function submitEditUser(id){
   const role = document.getElementById('editUserRole').value;
   const pass = document.getElementById('editUserPass').value;
   const destination = role==='destination' ? document.getElementById('editUserDest').value.trim() : null;
+  const origin = role==='origin' ? document.getElementById('editUserOrigin').value.trim() : null;
   if(role==='destination' && !destination){ pushToast('Please specify a destination.', 'err'); return; }
+  if(role==='origin' && !origin){ pushToast('Please specify an origin.', 'err'); return; }
   if(role==='admin' && state.users.filter(x=>x.role==='admin').length===1 && u.role==='admin'){
     // allow, still one admin remains (itself), just proceed
   }
+  if(pass && pass.length<4){ pushToast('Password should be at least 4 characters.', 'err'); return; }
+  const modules = readModulePicker('edit', role);
+  const probe = state.users.map(x=>x.id===u.id ? {...x, role, modules} : x);
+  if(!hasSettingsAdmin(probe)){ pushToast('At least one admin must keep access to Users & Settings.', 'err'); return; }
   u.role = role;
   u.destination = destination;
-  if(pass){ if(pass.length<4){ pushToast('Password should be at least 4 characters.', 'err'); return; } u.password = pass; }
+  u.origin = origin;
+  u.modules = modules;
+  if(pass) u.password = pass;
   await storageSet('st:users', state.users);
   if(u.id===state.currentUser.id) state.currentUser = u;
   closeModal();
@@ -1857,6 +1964,7 @@ async function deleteUser(id){
     pushToast('You must keep at least one admin account.', 'err');
     return;
   }
+  if(!hasSettingsAdmin(state.users.filter(x=>x.id!==id))){ pushToast('At least one admin must keep access to Users & Settings.', 'err'); return; }
   if(!confirm(`Delete user "${u.username}"?`)) return;
   state.users = state.users.filter(x=>x.id!==id);
   await storageSet('st:users', state.users);
@@ -1983,11 +2091,11 @@ function buildAllocationRows(){
     if(!l.destination || !l.agency) return;
     if(l.status!=='assigned' && l.status!=='received' && l.status!=='returning') return;
     const k = allocKey(l.destination,l.agency);
-    if(!map.has(k)) map.set(k, {allocId:null, origin:'', destination:l.destination, agency:l.agency, qty:null, locks:[], reserved:[]});
+    if(!map.has(k)) map.set(k, {allocId:null, origin:l.origin||'', destination:l.destination, agency:l.agency, qty:null, locks:[], reserved:[]});
     map.get(k).locks.push(l);
   });
   let rows = Array.from(map.values());
-  if(!isAdmin) rows = rows.filter(r=>r.destination===state.currentUser.destination);
+  if(!isAdmin) rows = rows.filter(r=> isOriginStaff() ? sameStr(r.origin, state.currentUser.origin) : r.destination===state.currentUser.destination);
   const f = state.allocFilters;
   if(f.destination!=='all') rows = rows.filter(r=>r.destination===f.destination);
   const byNo = (a,b)=>a.lockNo.localeCompare(b.lockNo,undefined,{numeric:true});
@@ -2040,7 +2148,7 @@ function renderAllocationTab(){
         <table>
           <thead><tr><th>Origin</th><th>Destination</th><th>Agency</th><th>Lock Qty Allocated</th><th>Assigned</th><th>Balance</th><th>Lock Numbers</th>${isAdmin?'<th>Actions</th>':''}</tr></thead>
           <tbody>
-            ${rows.length===0 ? `<tr class="empty-row"><td colspan="${isAdmin?8:7}">${emptyState('No allocations yet', isAdmin ? 'Add an allocation (with lock numbers) or assign locks to a destination and agency.' : 'Nothing is allocated to your destination yet.')}</td></tr>` : rows.map(r=>{
+            ${rows.length===0 ? `<tr class="empty-row"><td colspan="${isAdmin?8:7}">${emptyState('No allocations yet', isAdmin ? 'Add an allocation (with lock numbers) or assign locks to a destination and agency.' : 'Nothing is allocated to your destination or origin yet.')}</td></tr>` : rows.map(r=>{
               const n = r.locks.length;
               const hasQ = r.qty!==null;
               const bal = hasQ ? r.qty - n : null;
