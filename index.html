@@ -300,6 +300,7 @@ tbody tr:hover{background:#FAFBFD;}
 
 .assign-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;align-items:start;}
 .assign-grid .field{margin-bottom:0;}
+.remain-badge{float:right;padding:1px 9px;border-radius:20px;background:var(--accent-bg);color:var(--accent-dark);font-size:11.5px;font-weight:700;letter-spacing:0;text-transform:none;}
 .assign-info{margin-top:12px;padding:10px 12px;border-radius:8px;background:var(--surface-2);font-size:12.5px;}
 .step-n{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:var(--navy-3);color:#fff;font-size:11px;font-weight:700;margin-right:6px;}
 
@@ -389,6 +390,7 @@ const ICONS = {
   route: `<svg viewBox="0 0 24 24" fill="none"><circle cx="6" cy="6" r="2.4" stroke="currentColor" stroke-width="1.8"/><circle cx="18" cy="18" r="2.4" stroke="currentColor" stroke-width="1.8"/><path d="M8 7c3 0 2 6 5 6h3" stroke="currentColor" stroke-width="1.8" stroke-dasharray="2.5 2.5"/></svg>`,
   users: `<svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="3.2" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 20c.7-3.6 3-5.5 5.5-5.5s4.8 1.9 5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 5.5c1.6.3 2.8 1.7 2.8 3.4 0 1.7-1.2 3.1-2.8 3.4M17.5 14.7c2 .5 3.4 2.2 4 4.9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
   logout: `<svg viewBox="0 0 24 24" fill="none"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M16 17l5-5-5-5M21 12H9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  ret: `<svg viewBox="0 0 24 24" fill="none"><path d="M9 7L4 12l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 12h10a6 6 0 010 12" transform="translate(0 -5)" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
   alloc: `<svg viewBox="0 0 24 24" fill="none"><path d="M4 7l8-4 8 4-8 4-8-4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 12l8 4 8-4M4 17l8 4 8-4" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
   empty: `<svg viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M8 12h8M8 16h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`
 };
@@ -407,6 +409,7 @@ let state = {
   allocFilters: { search:'', destination:'all' },
   usageRange: 'week',
   assignForm: { dest:'', agency:'', lockId:'', plate:'' },
+  returnForm: { lockId:'' },
   selected: new Set(),
   modal: null,
   exportMenuOpen: null,
@@ -650,6 +653,7 @@ function renderShell(){
     {id:'dashboard', label:'Dashboard', icon:ICONS.dash},
     {id:'locks', label: isAdmin ? 'Truck Lock Assigning' : 'My Truck Locks', icon:ICONS.lock},
   ];
+  tabs.push({id:'return', label:'Return to Origin', icon:ICONS.ret});
   tabs.push({id:'allocation', label:'Allocation', icon:ICONS.alloc});
   if(isAdmin) tabs.push({id:'master', label:'Master Data', icon:ICONS.route});
   if(isAdmin) tabs.push({id:'settings', label:'Users & Settings', icon:ICONS.users});
@@ -687,6 +691,7 @@ function renderTab(){
   switch(state.activeTab){
     case 'dashboard': return renderDashboard();
     case 'locks': return renderLocksTab();
+    case 'return': return renderReturnTab();
     case 'allocation': return renderAllocationTab();
     case 'master': return renderMasterTab();
     case 'settings': return renderSettingsTab();
@@ -872,8 +877,6 @@ function renderLocksTab(){
     (isAdmin || selectedLocks.every(l=>l.destination===state.currentUser.destination));
   const canUnassign = isAdmin && selectedLocks.length>0 && selectedLocks.every(l=>l.status!=='available');
   const canDelete = isAdmin && selectedLocks.length>0;
-  const canReturnOrigin = selectedLocks.length>0 && selectedLocks.every(l=>l.status==='assigned'||l.status==='received') &&
-    (isAdmin || selectedLocks.every(l=>l.destination===state.currentUser.destination));
   const canArrive = isAdmin && selectedLocks.length>0 && selectedLocks.every(l=>l.status==='returning');
 
   return `
@@ -894,7 +897,6 @@ function renderLocksTab(){
       <div class="panel" style="padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
         <span style="font-size:13px;font-weight:600;">${selectedLocks.length} selected</span>
         ${canMarkReceived ? `<button class="btn btn-success btn-sm" onclick="bulkMarkReceived()">Mark received</button>` : ''}
-        ${canReturnOrigin ? `<button class="btn btn-accent btn-sm" onclick="bulkReturnToOrigin()">Return to origin</button>` : ''}
         ${canArrive ? `<button class="btn btn-success btn-sm" onclick="bulkArriveAtOrigin()">Mark back at origin</button>` : ''}
         ${canUnassign ? `<button class="btn btn-ghost btn-sm" onclick="bulkUnassign()">Release to available</button>` : ''}
         ${canDelete ? `<button class="btn btn-danger btn-sm" onclick="bulkDeleteLocks()">Delete</button>` : ''}
@@ -956,7 +958,6 @@ function renderLocksTab(){
                 <td>
                   <div class="action-row">
                     ${l.status==='assigned' && (isAdmin || l.destination===state.currentUser.destination) ? `<button class="btn btn-success btn-sm" onclick="markReceived('${l.id}')">Mark received</button>` : ''}
-                    ${(l.status==='assigned'||l.status==='received') && (isAdmin || l.destination===state.currentUser.destination) ? `<button class="btn btn-accent btn-sm" onclick="returnToOrigin('${l.id}')">Return to origin</button>` : ''}
                     ${isAdmin && l.status==='returning' ? `<button class="btn btn-success btn-sm" onclick="arriveAtOrigin('${l.id}')">Back at origin</button>` : ''}
                     ${isAdmin && l.status!=='available' ? `<button class="btn btn-ghost btn-sm" onclick="unassignLock('${l.id}')">Release</button>` : ''}
                     ${isAdmin ? `<button class="btn btn-ghost btn-sm" onclick="openModal('editLock', ['${l.id}'])">Edit</button>` : ''}
@@ -1033,7 +1034,7 @@ async function bulkMarkReceived(){
   render();
 }
 function canReturnLock(l){
-  if(!l || (l.status!=='assigned' && l.status!=='received')) return false;
+  if(!l || l.status!=='received') return false;
   return state.currentUser.role==='admin' || l.destination===state.currentUser.destination;
 }
 async function returnToOrigin(id){
@@ -1245,6 +1246,84 @@ function commonFieldValue(locks, field){
   const first = locks[0][field] || '';
   return locks.every(l=>(l[field]||'')===first) ? first : '';
 }
+/* ---------------- Return to Origin module ---------------- */
+function returnableLocks(){
+  return visibleLocksBase().filter(l=>l.status==='received').sort(lockSortNo);
+}
+function setReturnLock(id){ state.returnForm.lockId = id; render(); }
+function renderReturnTab(){
+  const isAdmin = state.currentUser.role === 'admin';
+  const f = state.returnForm;
+  const locks = returnableLocks();
+  if(f.lockId && !locks.some(l=>l.id===f.lockId)) f.lockId = '';
+  const sel = locks.find(l=>l.id===f.lockId) || null;
+  const returning = visibleLocksBase().filter(l=>l.status==='returning')
+    .sort((a,b)=>new Date(b.returnStartedAt||0)-new Date(a.returnStartedAt||0));
+  const detail = (label, value) => `<div><div class="stat-label">${label}</div><div style="font-weight:600;margin-top:3px;">${value}</div></div>`;
+  return `
+    <div class="topbar">
+      <div>
+        <h1 class="page-title">Return to Origin</h1>
+        <p class="page-sub">${isAdmin ? 'Pick a lock number received by a destination to send it back to its origin.' : `Send locks received at ${escapeHtml(state.currentUser.destination||'your destination')} back to their origin.`}</p>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:16px;">
+      <p class="panel-title">Return a lock</p>
+      <p class="panel-sub">Only locks already received by the destination are listed, lowest serial number first.</p>
+      <div class="assign-grid" style="grid-template-columns:minmax(220px,340px);">
+        <div class="field">
+          <label for="rtLock">Lock No.<span class="remain-badge" title="Locks received by the destination">Received: ${locks.length}</span></label>
+          <select id="rtLock" onchange="setReturnLock(this.value)" ${locks.length?'':'disabled'}>
+            <option value="">${locks.length ? 'Select lock no.' : 'No received locks'}</option>
+            ${locks.map(l=>`<option value="${l.id}" ${l.id===f.lockId?'selected':''}>${escapeHtml(l.lockNo)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      ${sel ? `
+        <div class="assign-info" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;">
+          ${detail('Lock No.', escapeHtml(sel.lockNo))}
+          ${detail('Status', statusBadge(sel.status))}
+          ${detail('Agency', escapeHtml(sel.agency||'—'))}
+          ${detail('Plate No.', `<span class="mono">${escapeHtml(sel.plate||'—')}</span>`)}
+          ${detail('Returning from (destination)', escapeHtml(sel.destination||'—'))}
+          ${detail('Returning to (origin)', escapeHtml(sel.origin||'—'))}
+          ${detail('Assigned', sel.assignedAt?fmtDate(sel.assignedAt):'—')}
+          ${detail('Received', sel.receivedAt?fmtDate(sel.receivedAt):'—')}
+        </div>
+        <div style="margin-top:14px;"><button class="btn btn-accent" onclick="submitReturnForm()">Return to origin</button></div>` : ''}
+    </div>
+    <div class="panel">
+      <p class="panel-title">Returning to origin</p>
+      <p class="panel-sub">Locks on their way back. ${isAdmin ? 'Mark each one once it is back at origin.' : 'An admin confirms when they are back at origin.'}</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Lock No.</th><th>Agency</th><th>Plate No.</th><th>From (destination)</th><th>To (origin)</th><th>Return started</th>${isAdmin?'<th>Actions</th>':''}</tr></thead>
+        <tbody>
+          ${returning.length===0 ? `<tr class="empty-row"><td colspan="${isAdmin?7:6}">${emptyState('Nothing returning', 'Locks you send back to origin will appear here.')}</td></tr>` : returning.map(l=>`
+            <tr>
+              <td class="mono">${escapeHtml(l.lockNo)}</td>
+              <td>${escapeHtml(l.agency||'—')}</td>
+              <td class="mono">${escapeHtml(l.plate||'—')}</td>
+              <td>${escapeHtml(l.destination||'—')}</td>
+              <td>${escapeHtml(l.origin||'—')}</td>
+              <td>${l.returnStartedAt?fmtDate(l.returnStartedAt):'—'}</td>
+              ${isAdmin ? `<td><button class="btn btn-success btn-sm" onclick="arriveAtOrigin('${l.id}')">Back at origin</button></td>` : ''}
+            </tr>`).join('')}
+        </tbody>
+      </table></div>
+    </div>
+    ${state.modal ? renderModal() : ''}
+  `;
+}
+async function submitReturnForm(){
+  const l = state.locks.find(x=>x.id===state.returnForm.lockId);
+  if(!canReturnLock(l)){ pushToast('Select a lock received by the destination.', 'err'); return; }
+  Object.assign(l, {status:'returning', returnStartedAt: nowStamp()});
+  await storageSet('st:locks', state.locks);
+  state.returnForm.lockId = '';
+  pushToast(`Lock ${l.lockNo} is returning to ${l.origin||'its origin'}.`, 'ok');
+  render();
+}
+
 /* ---------------- Truck Lock Assigning form ---------------- */
 function normalizePlate(v){ return String(v==null?'':v).toUpperCase().replace(/\s+/g,''); }
 function lockSortNo(a,b){ return String(a.lockNo).localeCompare(String(b.lockNo), undefined, {numeric:true, sensitivity:'base'}); }
@@ -1317,9 +1396,9 @@ function renderAssignForm(){
           </select>
         </div>
         <div class="field">
-          <label for="afLock"><span class="step-n">3</span>Lock No.</label>
+          <label for="afLock"><span class="step-n">3</span>Lock No.${alloc ? `<span class="remain-badge" title="Locks still assignable to this destination and agency">Remaining: ${Math.min(locks.length, allocLeft(alloc))}</span>` : ''}</label>
           <select id="afLock" onchange="setAssignField('lockId', this.value)" ${alloc?'':'disabled'}>
-            <option value="">${alloc ? (locks.length ? `Select lock no. (${locks.length} available)` : 'No available locks') : 'Select lock no.'}</option>
+            <option value="">${alloc ? (locks.length ? 'Select lock no.' : 'No available locks') : 'Select lock no.'}</option>
             ${locks.map(l=>`<option value="${l.id}" ${l.id===f.lockId?'selected':''}>${escapeHtml(l.lockNo)}</option>`).join('')}
           </select>
         </div>
