@@ -397,6 +397,8 @@ const ICONS = {
   route: `<svg viewBox="0 0 24 24" fill="none"><circle cx="6" cy="6" r="2.4" stroke="currentColor" stroke-width="1.8"/><circle cx="18" cy="18" r="2.4" stroke="currentColor" stroke-width="1.8"/><path d="M8 7c3 0 2 6 5 6h3" stroke="currentColor" stroke-width="1.8" stroke-dasharray="2.5 2.5"/></svg>`,
   users: `<svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="3.2" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 20c.7-3.6 3-5.5 5.5-5.5s4.8 1.9 5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 5.5c1.6.3 2.8 1.7 2.8 3.4 0 1.7-1.2 3.1-2.8 3.4M17.5 14.7c2 .5 3.4 2.2 4 4.9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
   logout: `<svg viewBox="0 0 24 24" fill="none"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M16 17l5-5-5-5M21 12H9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  repo: `<svg viewBox="0 0 24 24" fill="none"><rect x="3.5" y="4" width="17" height="5" rx="1.2" stroke="currentColor" stroke-width="1.8"/><path d="M5 9v9a1.5 1.5 0 001.5 1.5h11A1.5 1.5 0 0019 18V9M9.5 13h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+  inbox: `<svg viewBox="0 0 24 24" fill="none"><path d="M4 13l2.5-7h11L20 13v5a1 1 0 01-1 1H5a1 1 0 01-1-1v-5z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 13h4l1 2h6l1-2h4M12 4v6m0 0l-2.5-2.5M12 10l2.5-2.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   ret: `<svg viewBox="0 0 24 24" fill="none"><path d="M9 7L4 12l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 12h10a6 6 0 010 12" transform="translate(0 -5)" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
   alloc: `<svg viewBox="0 0 24 24" fill="none"><path d="M4 7l8-4 8 4-8 4-8-4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 12l8 4 8-4M4 17l8 4 8-4" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
   empty: `<svg viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M8 12h8M8 16h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`
@@ -417,6 +419,10 @@ let state = {
   usageRange: 'week',
   assignForm: { dest:'', agency:'', lockId:'', plate:'' },
   returnForm: { lockId:'' },
+  txlogs: [],
+  repoFilters: { from:'', to:'', destination:'all', action:'all', search:'', group:'none' },
+  receiveRemarks: {},
+  receiveFilters: { search:'', destination:'all', type:'all' },
   selected: new Set(),
   modal: null,
   exportMenuOpen: null,
@@ -447,6 +453,7 @@ async function storageGet(key){
   }catch(e){ return null; }
 }
 async function storageSet(key, val){
+  if(key==='st:locks' && Array.isArray(state.txlogs)) await storageSet('st:txlogs', state.txlogs);
   if(hasCloudStorage()){
     try{
       await window.storage.set(key, JSON.stringify(val), true);
@@ -496,6 +503,21 @@ async function initApp(){
   let allocations = await storageGet('st:allocations');
   if(!allocations || !Array.isArray(allocations)) allocations = [];
   state.allocations = allocations;
+  let txlogs = await storageGet('st:txlogs');
+  if(!Array.isArray(txlogs)){
+    // First run with the Repository: rebuild what history we can from the dates already stored on each lock.
+    txlogs = [];
+    const add = (l, ts, action, remarks)=>{ if(ts) txlogs.push({id:genId('tx'), ts, lockId:l.id, lockNo:l.lockNo, action, agency:l.agency||'', plate:l.plate||'', origin:l.origin||'', destination:l.destination||'', remarks:remarks||'', by:'(history)', role:''}); };
+    locks.forEach(l=>{
+      add(l, l.createdAt, 'added', '');
+      add(l, l.assignedAt, 'assigned', '');
+      add(l, l.receivedAt, 'received', l.receivedRemarks||'');
+      add(l, l.returnStartedAt, 'return_started', '');
+    });
+    txlogs.sort((a,b)=>String(a.ts).localeCompare(String(b.ts)));
+    await storageSet('st:txlogs', txlogs);
+  }
+  state.txlogs = txlogs;
   state.routes = routes;
   state.loading = false;
   render();
@@ -539,18 +561,21 @@ function allDestinations(){
 const MODULES = [
   {id:'dashboard',  label:'Dashboard',            icon:ICONS.dash},
   {id:'locks',      label:'Truck Lock Assigning', icon:ICONS.lock},
+  {id:'receive',    label:'Truck Lock to Receive', icon:ICONS.inbox, roles:['admin','destination','origin']},
   {id:'return',     label:'Return to Origin',     icon:ICONS.ret},
   {id:'allocation', label:'Allocation',           icon:ICONS.alloc},
-  {id:'master',     label:'Master Data',          icon:ICONS.route, adminOnly:true},
-  {id:'settings',   label:'Users & Settings',     icon:ICONS.users, adminOnly:true}
+  {id:'repository', label:'Repository',           icon:ICONS.repo},
+  {id:'master',     label:'Master Data',          icon:ICONS.route, roles:['admin']},
+  {id:'settings',   label:'Users & Settings',     icon:ICONS.users, roles:['admin']}
 ];
+function modAllowed(m, role){ return !m.roles || m.roles.includes(role); }
 function defaultModulesFor(role){
-  return role==='admin' ? MODULES.map(m=>m.id) : MODULES.filter(m=>!m.adminOnly).map(m=>m.id);
+  return MODULES.filter(m=>modAllowed(m, role)).map(m=>m.id);
 }
 function userModules(u){
   if(!u) return [];
   const base = Array.isArray(u.modules) ? u.modules : defaultModulesFor(u.role);
-  return MODULES.filter(m=>base.includes(m.id) && !(m.adminOnly && u.role!=='admin')).map(m=>m.id);
+  return MODULES.filter(m=>base.includes(m.id) && modAllowed(m, u.role)).map(m=>m.id);
 }
 function modLabel(id){ const m = MODULES.find(x=>x.id===id); return m ? m.label : id; }
 function allOrigins(){
@@ -731,6 +756,8 @@ function renderTab(){
   switch(state.activeTab){
     case 'dashboard': return renderDashboard();
     case 'locks': return renderLocksTab();
+    case 'receive': return renderReceiveTab();
+    case 'repository': return renderRepositoryTab();
     case 'return': return renderReturnTab();
     case 'allocation': return renderAllocationTab();
     case 'master': return renderMasterTab();
@@ -913,7 +940,7 @@ function renderLocksTab(){
   const agencies = allAgencies();
 
   const selectedLocks = base.filter(l=>state.selected.has(l.id));
-  const canMarkReceived = selectedLocks.length>0 && selectedLocks.every(l=>l.status==='assigned') &&
+  const canMarkReceived = isAdmin && selectedLocks.length>0 && selectedLocks.every(l=>l.status==='assigned') &&
     (isAdmin || (isDestStaff() && selectedLocks.every(l=>l.destination===state.currentUser.destination)));
   const canUnassign = isAdmin && selectedLocks.length>0 && selectedLocks.every(l=>l.status!=='available');
   const canDelete = isAdmin && selectedLocks.length>0;
@@ -994,10 +1021,10 @@ function renderLocksTab(){
                 <td>${escapeHtml(l.origin||'—')}</td>
                 <td>${escapeHtml(l.destination||'—')}</td>
                 <td>${l.assignedAt?fmtDate(l.assignedAt):'—'}</td>
-                <td>${l.receivedAt?fmtDate(l.receivedAt):'—'}</td>
+                <td>${l.receivedAt?fmtDate(l.receivedAt):'—'}${l.receivedRemarks?`<div class="helper-text" title="Receive remarks">${escapeHtml(l.receivedRemarks)}</div>`:''}${(l.status==='available' && l.returnRemarks)?`<div class="helper-text" title="Remarks when returned to origin">Returned: ${escapeHtml(l.returnRemarks)}</div>`:''}</td>
                 <td>
                   <div class="action-row">
-                    ${l.status==='assigned' && (isAdmin || (isDestStaff() && l.destination===state.currentUser.destination)) ? `<button class="btn btn-success btn-sm" onclick="markReceived('${l.id}')">Mark received</button>` : ''}
+                    ${l.status==='assigned' && isAdmin ? `<button class="btn btn-success btn-sm" onclick="markReceived('${l.id}')">Mark received</button>` : ''}
                     ${canArriveLock(l) ? `<button class="btn btn-success btn-sm" onclick="arriveAtOrigin('${l.id}')">Back at origin</button>` : ''}
                     ${isAdmin && l.status!=='available' ? `<button class="btn btn-ghost btn-sm" onclick="unassignLock('${l.id}')">Release</button>` : ''}
                     ${isAdmin ? `<button class="btn btn-ghost btn-sm" onclick="openModal('editLock', ['${l.id}'])">Edit</button>` : ''}
@@ -1055,18 +1082,20 @@ function clearSelection(){ state.selected = new Set(); render(); }
 async function markReceived(id){
   const lock = state.locks.find(l=>l.id===id);
   if(!lock) return;
-  if(!(state.currentUser.role==='admin' || (isDestStaff() && lock.destination===state.currentUser.destination))){ pushToast("You can't mark this lock as received.", 'err'); return; }
+  if(state.currentUser.role!=='admin'){ pushToast("Only an admin can mark received here. Use Truck Lock to Receive.", 'err'); return; }
   lock.status = 'received';
   lock.receivedAt = nowStamp();
+  logTx(lock, 'received', '');
   await storageSet('st:locks', state.locks);
   pushToast(`Lock ${lock.lockNo} marked as received.`, 'ok');
   render();
 }
 async function bulkMarkReceived(){
+  if(state.currentUser.role!=='admin'){ pushToast("Only an admin can mark received here.", 'err'); return; }
   let n=0;
   state.locks.forEach(l=>{
     if(state.selected.has(l.id) && l.status==='assigned'){
-      l.status='received'; l.receivedAt = nowStamp(); n++;
+      l.status='received'; l.receivedAt = nowStamp(); logTx(l, 'received', ''); n++;
     }
   });
   await storageSet('st:locks', state.locks);
@@ -1083,6 +1112,7 @@ async function returnToOrigin(id){
   if(!canReturnLock(l)){ pushToast("This lock can't be returned to origin.", 'err'); return; }
   if(!confirm(`Send lock ${l.lockNo} back to its origin (${l.origin||'—'})?`)) return;
   Object.assign(l, {status:'returning', returnStartedAt: nowStamp()});
+  logTx(l, 'return_started', '');
   await storageSet('st:locks', state.locks);
   pushToast(`Lock ${l.lockNo} is returning to ${l.origin||'its origin'}.`, 'ok');
   render();
@@ -1092,15 +1122,17 @@ async function bulkReturnToOrigin(){
   if(!sel.length || !sel.every(canReturnLock)){ pushToast("Some selected locks can't be returned to origin.", 'err'); return; }
   if(!confirm(`Send ${sel.length} lock(s) back to their origin?`)) return;
   const stamp = nowStamp();
-  sel.forEach(l=>Object.assign(l,{status:'returning', returnStartedAt:stamp}));
+  sel.forEach(l=>{ Object.assign(l,{status:'returning', returnStartedAt:stamp}); logTx(l, 'return_started', ''); });
   await storageSet('st:locks', state.locks);
   state.selected = new Set();
   pushToast(`${sel.length} lock(s) returning to origin.`, 'ok');
   render();
 }
-function backToStock(l){
+function backToStock(l, remarks){
   // Back at origin: lock is available stock again. A reservation to an allocation stays in place.
-  Object.assign(l, {status:'available', agency:'', plate:'', origin:'', destination:'', assignedAt:null, receivedAt:null, returnStartedAt:null});
+  logTx(l, 'back_at_origin', remarks);
+  Object.assign(l, {status:'available', agency:'', plate:'', origin:'', destination:'', assignedAt:null, receivedAt:null, receivedRemarks:'', returnStartedAt:null,
+    returnedAt: nowStamp(), returnRemarks: String(remarks||'').trim(), returnedBy: state.currentUser.username});
 }
 async function arriveAtOrigin(id){
   const l = state.locks.find(x=>x.id===id);
@@ -1113,7 +1145,7 @@ async function arriveAtOrigin(id){
 async function bulkArriveAtOrigin(){
   const sel = state.locks.filter(l=>state.selected.has(l.id) && canArriveLock(l));
   if(!sel.length) return;
-  sel.forEach(backToStock);
+  sel.forEach(l=>backToStock(l));
   await storageSet('st:locks', state.locks);
   state.selected = new Set();
   pushToast(`${sel.length} lock(s) are back at origin and available.`, 'ok');
@@ -1123,7 +1155,8 @@ async function unassignLock(id){
   const lock = state.locks.find(l=>l.id===id);
   if(!lock) return;
   if(!confirm(`Release lock ${lock.lockNo} to Available? This clears its assignment.`)) return;
-  Object.assign(lock, {status:'available', agency:'', plate:'', origin:'', destination:'', assignedAt:null, receivedAt:null});
+  logTx(lock, 'released', '');
+  Object.assign(lock, {status:'available', agency:'', plate:'', origin:'', destination:'', assignedAt:null, receivedAt:null, receivedRemarks:''});
   await storageSet('st:locks', state.locks);
   pushToast(`Lock ${lock.lockNo} released to available.`, 'ok');
   render();
@@ -1132,7 +1165,8 @@ async function bulkUnassign(){
   if(!confirm(`Release ${state.selected.size} lock(s) to Available?`)) return;
   state.locks.forEach(l=>{
     if(state.selected.has(l.id)){
-      Object.assign(l, {status:'available', agency:'', plate:'', origin:'', destination:'', assignedAt:null, receivedAt:null});
+      if(l.status!=='available') logTx(l, 'released', '');
+      Object.assign(l, {status:'available', agency:'', plate:'', origin:'', destination:'', assignedAt:null, receivedAt:null, receivedRemarks:''});
     }
   });
   await storageSet('st:locks', state.locks);
@@ -1144,6 +1178,7 @@ async function deleteLock(id){
   const lock = state.locks.find(l=>l.id===id);
   if(!lock) return;
   if(!confirm(`Delete lock ${lock.lockNo} permanently?`)) return;
+  logTx(lock, 'deleted', '');
   state.locks = state.locks.filter(l=>l.id!==id);
   await storageSet('st:locks', state.locks);
   pushToast('Lock deleted.', 'ok');
@@ -1151,6 +1186,7 @@ async function deleteLock(id){
 }
 async function bulkDeleteLocks(){
   if(!confirm(`Delete ${state.selected.size} lock(s) permanently?`)) return;
+  state.locks.filter(l=>state.selected.has(l.id)).forEach(l=>logTx(l, 'deleted', ''));
   state.locks = state.locks.filter(l=>!state.selected.has(l.id));
   await storageSet('st:locks', state.locks);
   state.selected = new Set();
@@ -1246,11 +1282,13 @@ async function submitBulkLocks(){
   let added=0, skipped=0;
   numbers.forEach(n=>{
     if(existing.has(n.toLowerCase())){ skipped++; return; }
-    state.locks.push({
+    const nl = {
       id: genId('lk'), lockNo: n, status:'available',
       agency:'', plate:'', origin:'', destination:'',
       assignedAt:null, receivedAt:null, createdAt: nowStamp()
-    });
+    };
+    state.locks.push(nl);
+    logTx(nl, 'added', '');
     existing.add(n.toLowerCase());
     added++;
   });
@@ -1287,6 +1325,200 @@ function commonFieldValue(locks, field){
   const first = locks[0][field] || '';
   return locks.every(l=>(l[field]||'')===first) ? first : '';
 }
+/* ---------------- Repository module ---------------- */
+function txDay(ts){ const d = new Date(ts); const p = n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; }
+function repoScoped(){
+  const u = state.currentUser;
+  if(u.role==='destination') return state.txlogs.filter(e=>e.destination===u.destination);
+  if(u.role==='origin') return state.txlogs.filter(e=>sameStr(e.origin, u.origin));
+  return state.txlogs;
+}
+function repoFiltered(){
+  const f = state.repoFilters;
+  const q = f.search.trim().toLowerCase();
+  return repoScoped().filter(e=>{
+    if(f.from && txDay(e.ts) < f.from) return false;
+    if(f.to && txDay(e.ts) > f.to) return false;
+    if(f.destination!=='all' && e.destination!==f.destination) return false;
+    if(f.action!=='all' && e.action!==f.action) return false;
+    if(q && ![e.lockNo,e.agency,e.plate,e.origin,e.destination,e.remarks,e.by].join(' ').toLowerCase().includes(q)) return false;
+    return true;
+  }).sort((a,b)=>String(b.ts).localeCompare(String(a.ts)));
+}
+function updateRepoFilter(key, val){ state.repoFilters[key] = val; render(); }
+function resetRepoFilters(){ state.repoFilters = { from:'', to:'', destination:'all', action:'all', search:'', group:'none' }; render(); }
+function renderRepositoryTab(){
+  const isAdmin = state.currentUser.role==='admin';
+  const f = state.repoFilters;
+  const all = repoFiltered();
+  const LIMIT = 500;
+  const shown = all.slice(0, LIMIT);
+  const lockCount = new Set(all.map(e=>e.lockId)).size;
+  const dests = Array.from(new Set(repoScoped().map(e=>e.destination).filter(Boolean))).sort();
+
+  // grouping: none / lock / date / destination
+  let groups;
+  if(f.group==='none'){ groups = [{key:'', items:shown}]; }
+  else {
+    const keyOf = e => f.group==='lock' ? e.lockNo : (f.group==='date' ? txDay(e.ts) : (e.destination || '(no destination)'));
+    const map = new Map();
+    shown.forEach(e=>{ const k = keyOf(e); if(!map.has(k)) map.set(k, []); map.get(k).push(e); });
+    groups = Array.from(map.entries()).map(([key,items])=>({key, items: f.group==='lock' ? items.slice().reverse() : items}));
+    if(f.group==='lock') groups.sort((a,b)=>String(a.key).localeCompare(String(b.key), undefined, {numeric:true}));
+    else if(f.group==='date') groups.sort((a,b)=>String(b.key).localeCompare(String(a.key)));
+    else groups.sort((a,b)=>String(a.key).localeCompare(String(b.key)));
+  }
+  const row = e => `
+    <tr>
+      <td>${fmtDate(e.ts)}</td>
+      <td class="mono">${escapeHtml(e.lockNo)}</td>
+      <td><span class="badge ${TX_BADGE[e.action]||'badge-noquota'}">${escapeHtml(TX_LABELS[e.action]||e.action)}</span></td>
+      <td>${escapeHtml(e.destination||'—')}</td>
+      <td>${escapeHtml(e.agency||'—')}</td>
+      <td class="mono">${escapeHtml(e.plate||'—')}</td>
+      <td>${escapeHtml(e.origin||'—')}</td>
+      <td>${escapeHtml(e.remarks||'')}</td>
+      <td>${escapeHtml(e.by||'—')}</td>
+    </tr>`;
+  const groupLabel = k => f.group==='date' ? new Date(k+'T12:00:00').toLocaleDateString(undefined,{weekday:'short',year:'numeric',month:'short',day:'numeric'}) : k;
+  return `
+    <div class="topbar">
+      <div>
+        <h1 class="page-title">Repository</h1>
+        <p class="page-sub">${isAdmin ? 'Every lock transaction, logged by lock, date and destination.' : `Lock transactions for ${escapeHtml(scopeName(state.currentUser))}.`}</p>
+      </div>
+      <div class="action-row">${renderExportMenu('repository')}</div>
+    </div>
+    <div class="panel">
+      <div class="table-toolbar" style="flex-wrap:wrap;gap:10px;">
+        <div class="grow" style="min-width:200px;"><input id="repoSearch" class="search-input" placeholder="Search lock no, agency, plate, remarks, user…" value="${escapeHtml(f.search)}" oninput="updateRepoFilter('search', this.value)"></div>
+        <label class="helper-text" style="display:flex;align-items:center;gap:6px;">From <input type="date" value="${f.from}" onchange="updateRepoFilter('from', this.value)"></label>
+        <label class="helper-text" style="display:flex;align-items:center;gap:6px;">To <input type="date" value="${f.to}" onchange="updateRepoFilter('to', this.value)"></label>
+        ${isAdmin ? `<select class="filter-select" onchange="updateRepoFilter('destination', this.value)">
+          <option value="all">All destinations</option>
+          ${dests.map(d=>`<option value="${escapeHtml(d)}" ${f.destination===d?'selected':''}>${escapeHtml(d)}</option>`).join('')}
+        </select>` : ''}
+        <select class="filter-select" onchange="updateRepoFilter('action', this.value)">
+          <option value="all">All transactions</option>
+          ${Object.keys(TX_LABELS).map(k=>`<option value="${k}" ${f.action===k?'selected':''}>${TX_LABELS[k]}</option>`).join('')}
+        </select>
+        <select class="filter-select" onchange="updateRepoFilter('group', this.value)" title="Group by">
+          <option value="none" ${f.group==='none'?'selected':''}>No grouping</option>
+          <option value="lock" ${f.group==='lock'?'selected':''}>Group by lock</option>
+          <option value="date" ${f.group==='date'?'selected':''}>Group by date</option>
+          <option value="destination" ${f.group==='destination'?'selected':''}>Group by destination</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" onclick="resetRepoFilters()">Reset</button>
+      </div>
+      <p class="helper-text" style="margin:0 0 10px;">${all.length} transaction(s) across ${lockCount} lock(s)${all.length>LIMIT?` · showing the latest ${LIMIT}, narrow the filters or download for everything`:''}</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Date</th><th>Lock No.</th><th>Transaction</th><th>Destination</th><th>Agency</th><th>Plate No.</th><th>Origin</th><th>Remarks</th><th>By</th></tr></thead>
+        <tbody>
+          ${shown.length===0 ? `<tr class="empty-row"><td colspan="9">${emptyState('No transactions', 'Lock activity will be logged here as it happens.')}</td></tr>` :
+            groups.map(g=> (f.group==='none' ? '' : `<tr><td colspan="9" style="background:var(--surface-2);font-weight:700;">${escapeHtml(groupLabel(g.key))} <span class="helper-text">· ${g.items.length}</span></td></tr>`) + g.items.map(row).join('')).join('')}
+        </tbody>
+      </table></div>
+    </div>
+    ${state.modal ? renderModal() : ''}
+  `;
+}
+
+/* ---------------- Truck Lock to Receive module ---------------- */
+// Two kinds of receiving: assigned locks arriving at a destination, and returning locks arriving back at their origin.
+function canReceiveLock(l){
+  if(!l || l.status!=='assigned') return false;
+  return state.currentUser.role==='admin' || (isDestStaff() && l.destination===state.currentUser.destination);
+}
+function canReceiveItem(l){ return l && l.status==='returning' ? canArriveLock(l) : canReceiveLock(l); }
+function receivableLocks(){
+  const f = state.receiveFilters;
+  const role = state.currentUser.role;
+  const q = f.search.trim().toLowerCase();
+  const okStatus = l => role==='origin' ? l.status==='returning'
+    : (role==='destination' ? l.status==='assigned' : (l.status==='assigned' || l.status==='returning'));
+  return visibleLocksBase().filter(okStatus)
+    .filter(l=>f.destination==='all' || l.destination===f.destination)
+    .filter(l=>role!=='admin' || f.type==='all' || (f.type==='origin' ? l.status==='returning' : l.status==='assigned'))
+    .filter(l=>!q || [l.lockNo,l.agency,l.plate,l.origin,l.destination].join(' ').toLowerCase().includes(q))
+    .sort((a,b)=>String(a.status).localeCompare(String(b.status)) || String(a.destination||'').localeCompare(String(b.destination||'')) || lockSortNo(a,b));
+}
+function updateReceiveFilter(key, val){ state.receiveFilters[key] = val; render(); }
+function onRemarksInput(id, el){ state.receiveRemarks[id] = el.value; }
+function renderReceiveTab(){
+  const role = state.currentUser.role;
+  const isAdmin = role === 'admin';
+  const list = receivableLocks();
+  const pending = visibleLocksBase().filter(l=>l.status==='assigned' || l.status==='returning');
+  const dests = Array.from(new Set(pending.map(l=>l.destination).filter(Boolean))).sort();
+  const f = state.receiveFilters;
+  const sub = isAdmin ? 'Assigned locks waiting at each destination, and returning locks waiting to be received back at their origin.'
+    : (role==='origin' ? `Locks returning to ${escapeHtml(state.currentUser.origin||'your origin')}. Add remarks and press Received once a lock is back.`
+    : `Assigned locks heading to ${escapeHtml(state.currentUser.destination||'your destination')}. Add remarks and press Received once a lock arrives.`);
+  const cols = isAdmin ? 9 : 8;
+  return `
+    <div class="topbar">
+      <div>
+        <h1 class="page-title">Truck Lock to Receive</h1>
+        <p class="page-sub">${sub}</p>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="table-toolbar">
+        <div class="grow"><input id="rcvSearch" class="search-input" placeholder="Search lock no, agency, plate, origin…" value="${escapeHtml(f.search)}" oninput="updateReceiveFilter('search', this.value)"></div>
+        ${isAdmin ? `<select class="filter-select" onchange="updateReceiveFilter('type', this.value)">
+          <option value="all" ${f.type==='all'?'selected':''}>All locks</option>
+          <option value="destination" ${f.type==='destination'?'selected':''}>To destination</option>
+          <option value="origin" ${f.type==='origin'?'selected':''}>Returning to origin</option>
+        </select>
+        <select class="filter-select" onchange="updateReceiveFilter('destination', this.value)">
+          <option value="all">All destinations</option>
+          ${dests.map(d=>`<option value="${escapeHtml(d)}" ${f.destination===d?'selected':''}>${escapeHtml(d)}</option>`).join('')}
+        </select>` : ''}
+        <span class="helper-text">${list.length} waiting</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr>${isAdmin?'<th>Type</th>':''}<th>Lock No.</th><th>Agency</th><th>Plate No.</th><th>Origin</th><th>Destination</th><th>Since</th><th>Remarks</th><th>Action</th></tr></thead>
+        <tbody>
+          ${list.length===0 ? `<tr class="empty-row"><td colspan="${cols}">${emptyState('Nothing to receive', role==='origin' ? 'Locks returning to your origin show up here until they are received.' : 'Locks assigned to a destination show up here until they are received.')}</td></tr>` : list.map(l=>{
+            const ret = l.status==='returning';
+            const since = ret ? l.returnStartedAt : l.assignedAt;
+            return `
+            <tr>
+              ${isAdmin ? `<td>${ret ? '<span class="badge badge-returning">To origin</span>' : '<span class="badge badge-assigned">To destination</span>'}</td>` : ''}
+              <td class="mono">${escapeHtml(l.lockNo)}</td>
+              <td>${escapeHtml(l.agency||'—')}</td>
+              <td class="mono">${escapeHtml(l.plate||'—')}</td>
+              <td>${ret ? `<b>${escapeHtml(l.origin||'—')}</b>` : escapeHtml(l.origin||'—')}</td>
+              <td>${ret ? escapeHtml(l.destination||'—') : `<b>${escapeHtml(l.destination||'—')}</b>`}</td>
+              <td>${since?fmtDate(since):'—'}</td>
+              <td><input id="rcvRem_${l.id}" placeholder="Remarks (optional)" maxlength="300" style="min-width:180px;" value="${escapeHtml(state.receiveRemarks[l.id]||'')}" oninput="onRemarksInput('${l.id}', this)"></td>
+              <td>${canReceiveItem(l) ? `<button class="btn btn-success btn-sm" title="${ret?'Back at origin':'Received at destination'}" onclick="receiveLock('${l.id}')">Received</button>` : ''}</td>
+            </tr>`; }).join('')}
+        </tbody>
+      </table></div>
+    </div>
+    ${state.modal ? renderModal() : ''}
+  `;
+}
+async function receiveLock(id){
+  const l = state.locks.find(x=>x.id===id);
+  if(!canReceiveItem(l)){ pushToast("You can't receive this lock.", 'err'); return; }
+  const remarks = String(state.receiveRemarks[id]||'').trim();
+  delete state.receiveRemarks[id];
+  if(l.status==='returning'){
+    const o = l.origin, no = l.lockNo;
+    backToStock(l, remarks);
+    await storageSet('st:locks', state.locks);
+    pushToast(`Lock ${no} received back at ${o||'origin'} and is available again.`, 'ok');
+  } else {
+    Object.assign(l, {status:'received', receivedAt: nowStamp(), receivedRemarks: remarks, receivedBy: state.currentUser.username});
+    logTx(l, 'received', remarks);
+    await storageSet('st:locks', state.locks);
+    pushToast(`Lock ${l.lockNo} received at ${l.destination}.`, 'ok');
+  }
+  render();
+}
+
 /* ---------------- Return to Origin module ---------------- */
 function returnableLocks(){
   return visibleLocksBase().filter(l=>l.status==='received').sort(lockSortNo);
@@ -1331,6 +1563,7 @@ function renderReturnTab(){
           ${detail('Returning to (origin)', escapeHtml(sel.origin||'—'))}
           ${detail('Assigned', sel.assignedAt?fmtDate(sel.assignedAt):'—')}
           ${detail('Received', sel.receivedAt?fmtDate(sel.receivedAt):'—')}
+          ${sel.receivedRemarks ? detail('Receive remarks', escapeHtml(sel.receivedRemarks)) : ''}
         </div>
         <div style="margin-top:14px;"><button class="btn btn-accent" onclick="submitReturnForm()">Return to origin</button></div>` : ''}
     </div>`}
@@ -1360,6 +1593,7 @@ async function submitReturnForm(){
   const l = state.locks.find(x=>x.id===state.returnForm.lockId);
   if(!canReturnLock(l)){ pushToast('Select a lock received by the destination.', 'err'); return; }
   Object.assign(l, {status:'returning', returnStartedAt: nowStamp()});
+  logTx(l, 'return_started', '');
   await storageSet('st:locks', state.locks);
   state.returnForm.lockId = '';
   pushToast(`Lock ${l.lockNo} is returning to ${l.origin||'its origin'}.`, 'ok');
@@ -1474,7 +1708,8 @@ async function submitAssignForm(){
   const used = allocUsedCount(alloc.destination, alloc.agency);
   if(used >= alloc.qty){ pushToast(`Exceeds allocation: ${alloc.agency} → ${alloc.destination} is full (${used}/${alloc.qty}).`, 'err'); return; }
   if(!r && alloc.qty - used - allocPendingReserved(alloc) <= 0){ pushToast(`The remaining slots in ${alloc.agency} → ${alloc.destination} are reserved for specific lock numbers.`, 'err'); return; }
-  Object.assign(lock, {agency: alloc.agency, plate, origin: alloc.origin, destination: alloc.destination, status:'assigned', assignedAt: nowStamp(), receivedAt:null});
+  Object.assign(lock, {agency: alloc.agency, plate, origin: alloc.origin, destination: alloc.destination, status:'assigned', assignedAt: nowStamp(), receivedAt:null, receivedRemarks:'', returnRemarks:''});
+  logTx(lock, 'assigned', '');
   await storageSet('st:locks', state.locks);
   state.assignForm.lockId = '';
   state.assignForm.plate = '';
@@ -1518,6 +1753,12 @@ async function submitEditLock(id){
   const lockNo = document.getElementById('editLockNo').value.trim();
   if(!lockNo){ pushToast('Lock number is required.', 'err'); return; }
   const status = document.getElementById('editStatus').value;
+  const newPlate = l.status==='available' ? '' : normalizePlate(document.getElementById('editPlate').value);
+  const changes = [];
+  if(lockNo !== l.lockNo) changes.push(`Lock no ${l.lockNo} → ${lockNo}`);
+  if(status !== l.status) changes.push(`Status ${l.status} → ${status}`);
+  if(newPlate !== (l.plate||'')) changes.push(`Plate ${l.plate||'—'} → ${newPlate||'—'}`);
+  if(changes.length) logTx(l, 'edited', changes.join('; '));
   l.lockNo = lockNo;
   l.plate = normalizePlate(document.getElementById('editPlate').value);
   if(l.status==='available'){ l.plate=''; l.origin=''; }
@@ -1526,7 +1767,7 @@ async function submitEditLock(id){
     if(status==='assigned' && !l.assignedAt) l.assignedAt = nowStamp();
     if(status==='received' && !l.receivedAt) l.receivedAt = nowStamp();
     if(status==='returning' && !l.returnStartedAt) l.returnStartedAt = nowStamp();
-    if(status==='available'){ Object.assign(l,{agency:'',plate:'',origin:'',destination:'',assignedAt:null,receivedAt:null,returnStartedAt:null}); }
+    if(status==='available'){ Object.assign(l,{agency:'',plate:'',origin:'',destination:'',assignedAt:null,receivedAt:null,receivedRemarks:'',returnStartedAt:null}); }
   }
   await storageSet('st:locks', state.locks);
   closeModal();
@@ -1736,7 +1977,7 @@ function renderSettingsTab(){
 
     <div class="panel">
       <p class="panel-title">Accounts</p>
-      <p class="panel-sub">Pick the modules each account can open. Destination accounts only see locks assigned to their destination, and origin accounts only see locks from their origin; Master Data and Users &amp; Settings are admin-only.</p>
+      <p class="panel-sub">Pick the modules each account can open. Destination accounts only see locks assigned to their destination, and origin accounts only see locks from their origin; Master Data and Users &amp; Settings are admin-only, and Truck Lock to Receive is where destinations receive assigned locks and origins receive returned ones.</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Username</th><th>Role</th><th>Destination / Origin</th><th>Modules</th><th>Created</th><th>Actions</th></tr></thead>
@@ -1746,7 +1987,7 @@ function renderSettingsTab(){
                 <td><b>${escapeHtml(u.username)}</b>${u.id===state.currentUser.id?' <span class="helper-text">(you)</span>':''}</td>
                 <td>${u.role==='admin'?'<span class="tag-pill tag-admin" style="color:var(--accent-dark);background:var(--accent-bg);">Admin</span>':(u.role==='origin'?'<span class="tag-pill" style="background:#ede9fe;color:#6d28d9;">Origin</span>':'<span class="tag-pill" style="background:var(--slate-bg);color:var(--slate);">Destination</span>')}</td>
                 <td>${escapeHtml((u.role==='origin' ? u.origin : u.destination)||'—')}</td>
-                <td>${(()=>{ const m = userModules(u); const all = MODULES.filter(x=>!(x.adminOnly && u.role!=='admin')).length; return m.length===0 ? '<span class="helper-text">None</span>' : (m.length===all ? '<span class="helper-text">All modules</span>' : `<div class="mod-mini">${m.map(id=>`<span class="chip">${escapeHtml(modLabel(id))}</span>`).join('')}</div>`); })()}</td>
+                <td>${(()=>{ const m = userModules(u); const all = MODULES.filter(x=>modAllowed(x, u.role)).length; return m.length===0 ? '<span class="helper-text">None</span>' : (m.length===all ? '<span class="helper-text">All modules</span>' : `<div class="mod-mini">${m.map(id=>`<span class="chip">${escapeHtml(modLabel(id))}</span>`).join('')}</div>`); })()}</td>
                 <td>${u.createdAt?fmtDate(u.createdAt):'—'}</td>
                 <td class="action-row">
                   <button class="btn btn-ghost btn-sm" onclick="openModal('editUser', ['${u.id}'])">Edit</button>
@@ -1846,8 +2087,8 @@ function renderModulePicker(prefix, role, selected){
       <label>Module access</label>
       <div class="mod-grid" id="${prefix}ModGrid">
         ${MODULES.map(m=>{
-          const off = m.adminOnly && role!=='admin';
-          return `<label class="mod-opt ${off?'is-off':''}" id="${prefix}ModLbl_${m.id}"><input type="checkbox" id="${prefix}Mod_${m.id}" ${(!off && selected.includes(m.id))?'checked':''} ${off?'disabled':''}> ${escapeHtml(m.label)}${m.adminOnly?' <span class="helper-text">(admin only)</span>':''}</label>`;
+          const off = !modAllowed(m, role);
+          return `<label class="mod-opt ${off?'is-off':''}" id="${prefix}ModLbl_${m.id}"><input type="checkbox" id="${prefix}Mod_${m.id}" ${(!off && selected.includes(m.id))?'checked':''} ${off?'disabled':''}> ${escapeHtml(m.label)}${m.roles?` <span class="helper-text">(${m.roles.join(' &amp; ')} only)</span>`:''}</label>`;
         }).join('')}
       </div>
       <div class="helper-text">Only ticked modules appear in this account's menu.</div>
@@ -1862,7 +2103,7 @@ function onUserRoleChange(prefix){
   MODULES.forEach(m=>{
     const cb = document.getElementById(prefix+'Mod_'+m.id), lbl = document.getElementById(prefix+'ModLbl_'+m.id);
     if(!cb) return;
-    const off = m.adminOnly && role!=='admin';
+    const off = !modAllowed(m, role);
     cb.disabled = off;
     cb.checked = !off && defs.includes(m.id);
     if(lbl) lbl.classList.toggle('is-off', off);
@@ -1871,7 +2112,7 @@ function onUserRoleChange(prefix){
 function readModulePicker(prefix, role){
   return MODULES.filter(m=>{
     const cb = document.getElementById(prefix+'Mod_'+m.id);
-    return cb && cb.checked && !(m.adminOnly && role!=='admin');
+    return cb && cb.checked && modAllowed(m, role);
   }).map(m=>m.id);
 }
 // At least one admin must keep Users & Settings access, or nobody could manage accounts.
@@ -1988,7 +2229,8 @@ function exportData(scope, format){
       'Origin': l.origin||'',
       'Destination': l.destination||'',
       'Assigned Date': l.assignedAt ? fmtDate(l.assignedAt) : '',
-      'Received Date': l.receivedAt ? fmtDate(l.receivedAt) : ''
+      'Received Date': l.receivedAt ? fmtDate(l.receivedAt) : '',
+      'Receive Remarks': l.receivedRemarks || ''
     }));
     filename = 'gps_locks_export';
   } else if(scope === 'routes'){
@@ -2008,6 +2250,14 @@ function exportData(scope, format){
       });
     });
     rows = out; filename = 'allocation_export';
+  }
+  if(scope === 'repository'){
+    rows = repoFiltered().map(e=>({
+      'Date': fmtDate(e.ts), 'Lock No': e.lockNo, 'Transaction': TX_LABELS[e.action]||e.action,
+      'Destination': e.destination||'', 'Agency': e.agency||'', 'Plate No': e.plate||'', 'Origin': e.origin||'',
+      'Remarks': e.remarks||'', 'By': e.by||''
+    }));
+    filename = 'spx_truck_lock_gps_repository';
   }
   if(rows.length===0){
     pushToast('Nothing to export yet.', 'err');
@@ -2030,6 +2280,17 @@ function exportData(scope, format){
   }
   pushToast('Export ready — check your downloads.', 'ok');
   render();
+}
+
+/* ---------------- Transaction log (Repository) ---------------- */
+const TX_LABELS = {added:'Added to stock', assigned:'Assigned', received:'Received at destination', return_started:'Return to origin started', back_at_origin:'Received back at origin', released:'Released to available', edited:'Edited', deleted:'Deleted'};
+const TX_BADGE = {added:'badge-available', assigned:'badge-assigned', received:'badge-received', return_started:'badge-returning', back_at_origin:'badge-received', released:'badge-noquota', edited:'badge-noquota', deleted:'badge-noquota'};
+function logTx(l, action, remarks){
+  const u = state.currentUser || {};
+  state.txlogs.push({id:genId('tx'), ts:nowStamp(), lockId:l.id, lockNo:l.lockNo, action,
+    agency:l.agency||'', plate:l.plate||'', origin:l.origin||'', destination:l.destination||'',
+    remarks:String(remarks||'').trim(), by:u.username||'', role:u.role||''});
+  if(state.txlogs.length > 20000) state.txlogs.splice(0, state.txlogs.length - 20000);
 }
 
 /* ---------------- Allocation module ---------------- */
