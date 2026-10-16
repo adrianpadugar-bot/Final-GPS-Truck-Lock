@@ -454,6 +454,7 @@ let state = {
   plateSheet: {url:'', apiKey:''},
   plateData: null,
   plateLoading: false,
+  plateDiag: null,
   plateError: '',
   plateFilters: {search:'', use:'all'},
   destGeo: {},
@@ -560,7 +561,7 @@ async function initApp(){
   }
   state.txlogs = txlogs;
   let plateSheet = await storageGet('st:platesheet');
-  state.plateSheet = (plateSheet && typeof plateSheet==='object' && !Array.isArray(plateSheet)) ? plateSheet : {url:'', apiKey:''};
+  state.plateSheet = (plateSheet && typeof plateSheet==='object' && !Array.isArray(plateSheet)) ? plateSheet : {url:DEFAULT_PLATE_SHEET, apiKey:''};
   startPlatePolling();
   let plateData = await storageGet('st:platedata');
   state.plateData = (plateData && Array.isArray(plateData.rows)) ? plateData : null;
@@ -1943,6 +1944,7 @@ async function receiveLock(id){
 
 /* ---------------- Available Plates module (live Google Sheet) ---------------- */
 const PLATE_POLL_MS = 60*1000;
+const DEFAULT_PLATE_SHEET = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vR3LfsNBiXClAGk0KxIAs1cfj7gRwjK6zeofjTvjumSWH9_jcfgmY0BwkIb2llPi_a3yZ3E3YVMXSl3/pub?gid=1481905008&single=true&output=csv';
 let plateTimer = null, plateChecked = null;
 function parseSheetUrl(u){
   const url = String(u||'').trim();
@@ -1954,7 +1956,7 @@ function parseSheetUrl(u){
 async function fetchSheetApi(id, gid, key){
   const base = `https://sheets.googleapis.com/v4/spreadsheets/${id}`;
   const j = async (u)=>{
-    const res = await fetch(u, {cache:'no-store'});
+    const res = await fetch(u);
     const data = await res.json().catch(()=>({}));
     if(!res.ok) throw new Error((data.error && data.error.message) || ('Google returned '+res.status));
     return data;
@@ -1967,41 +1969,133 @@ async function fetchSheetApi(id, gid, key){
   return vals.values || [];
 }
 // Read the sheet as CSV (works for "anyone with the link" or "published to the web" sheets).
-async function fetchSheetCsvMatrix(id, gid, published){
+// Plain GET requests only: extra request headers would trigger a CORS preflight that Google does not answer.
+function plateErrText(e){
+  const m = (e && e.message) ? e.message : String(e);
+  return /failed to fetch|networkerror|load failed/i.test(m)
+    ? 'the browser blocked the request to Google (Failed to fetch)' : m;
+}
+async function fetchSheetCsvMatrix(id, gid, published, originalUrl){
   const g = gid ? '&gid='+gid : '';
-  const tries = published
-    ? [`https://docs.google.com/spreadsheets/d/e/${id}/pub?output=csv${g}`]
-    : [`https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:csv${g}`, `https://docs.google.com/spreadsheets/d/${id}/export?format=csv${g}`];
-  let lastErr = null;
+  const bust = '&_=' + Date.now();
+  const tries = [];
+  if(published){
+    if(/output=csv/i.test(originalUrl||'')) tries.push(originalUrl + (originalUrl.includes('?') ? '&' : '?') + '_=' + Date.now());
+    tries.push(`https://docs.google.com/spreadsheets/d/e/${id}/pub?output=csv${g}${bust}`);
+  } else {
+    tries.push(`https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:csv${g}${bust}`);
+    tries.push(`https://docs.google.com/spreadsheets/d/${id}/export?format=csv${g}${bust}`);
+  }
+  const problems = [];
   for(const u of tries){
     try{
-      const res = await fetch(u, {cache:'no-store'});
-      if(!res.ok){ lastErr = new Error('Google returned '+res.status); continue; }
+      const res = await fetch(u);
+      if(!res.ok){ problems.push('Google returned '+res.status); continue; }
       const text = await res.text();
-      if(/^\s*<(!doctype|html)/i.test(text)){ lastErr = new Error('The sheet is private. Share it as "Anyone with the link can view" or publish it to the web.'); continue; }
+      if(/^\s*<(!doctype|html)/i.test(text)){ problems.push('the sheet is not published / not shared with "Anyone with the link"'); continue; }
       const wb = XLSX.read(text, {type:'string'});
       return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header:1, defval:'', raw:false});
-    }catch(e){ lastErr = e; }
+    }catch(e){ problems.push(plateErrText(e)); }
   }
-  throw lastErr || new Error('Could not reach Google Sheets.');
+  throw new Error('Could not read the sheet: ' + Array.from(new Set(problems)).join('; ') + '.');
+}
+const PLATE_SCRIPT_CODE = [
+  "// Paste in the Google Sheet: Extensions > Apps Script. Then Deploy > New deployment > Web app.",
+  "// Execute as: Me   |   Who has access: Anyone",
+  "const SHEET_NAME = '';   // leave empty for the first tab, or type the tab name, e.g. 'Plates'",
+  "const TOKEN = '';        // optional secret: if set, add ?key=YOUR_SECRET to the web app link",
+  "",
+  "function doGet(e) {",
+  "  try {",
+  "    if (TOKEN && (!e || !e.parameter || e.parameter.key !== TOKEN)) return out_({ok: false, error: 'Not authorised'});",
+  "    const ss = SpreadsheetApp.getActiveSpreadsheet();",
+  "    const sh = SHEET_NAME ? ss.getSheetByName(SHEET_NAME) : ss.getSheets()[0];",
+  "    if (!sh) return out_({ok: false, error: 'Tab not found: ' + SHEET_NAME});",
+  "    return out_({ok: true, updated: new Date().toISOString(), values: sh.getDataRange().getDisplayValues()});",
+  "  } catch (err) {",
+  "    return out_({ok: false, error: String(err)});",
+  "  }",
+  "}",
+  "",
+  "function out_(obj) {",
+  "  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);",
+  "}"
+].join('\n');
+function plateConfigured(){ return !!(((state.plateSheet.script||'').trim()) || ((state.plateSheet.url||'').trim())); }
+async function copyPlateScript(){
+  try{ await navigator.clipboard.writeText(PLATE_SCRIPT_CODE); pushToast('Apps Script code copied.', 'ok'); }
+  catch(e){ pushToast('Could not copy automatically. Select the code and copy it.', 'err'); }
+}
+// Apps Script web app: returns {ok, values:[[…]]}. Runs as the sheet owner, so the sheet itself can stay private.
+async function fetchSheetScript(url){
+  if(!/^https:\/\/script\.google(usercontent)?\.com\//.test(url)) throw new Error('That is not an Apps Script web app link (it should start with https://script.google.com/macros/s/…/exec).');
+  const res = await fetch(url + (url.includes('?') ? '&' : '?') + '_=' + Date.now());
+  if(!res.ok) throw new Error('Google returned ' + res.status);
+  let data;
+  try{ data = JSON.parse(await res.text()); }
+  catch(e){ throw new Error('the web app did not return data. Deploy it as a Web app with access "Anyone" and use the link ending in /exec'); }
+  if(!data.ok) throw new Error(data.error || 'the script reported an error');
+  return data.values || [];
+}
+async function fetchPlateMatrix(){
+  const script = (state.plateSheet.script||'').trim(), url = (state.plateSheet.url||'').trim();
+  const problems = [];
+  if(script){
+    try{ return await fetchSheetScript(script); }
+    catch(e){ problems.push('Apps Script: ' + plateErrText(e) + '.'); if(!url) throw new Error(problems.join(' ')); }
+  }
+  try{ return await fetchSheetMatrix(url, state.plateSheet.apiKey); }
+  catch(e){ if(problems.length) throw new Error(problems.join(' ') + ' Sheet link: ' + e.message); throw e; }
+}
+function fetchSheetJsonp(id, gid){
+  return new Promise((resolve, reject)=>{
+    const cb = 'phJsonp' + Date.now();
+    const sc = document.createElement('script');
+    let done = false;
+    const clean = ()=>{ try{ delete window[cb]; }catch(e){ window[cb] = undefined; } if(sc.parentNode) sc.parentNode.removeChild(sc); };
+    window[cb] = (resp)=>{
+      done = true; clean();
+      if(!resp || resp.status==='error'){ reject(new Error((resp && resp.errors && resp.errors[0] && (resp.errors[0].detailed_message || resp.errors[0].message)) || 'Google refused the request')); return; }
+      const cols = resp.table.cols.map(c=>c.label || '');
+      const rows = resp.table.rows.map(r=>(r.c||[]).map(c=>c ? (c.f!=null ? c.f : (c.v==null ? '' : c.v)) : ''));
+      resolve([cols, ...rows]);
+    };
+    sc.onerror = ()=>{ if(!done){ clean(); reject(new Error('the browser blocked the script request to Google')); } };
+    sc.src = `https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=responseHandler:${cb}${gid?'&gid='+gid:''}&tq=${encodeURIComponent('select *')}&_=${Date.now()}`;
+    document.head.appendChild(sc);
+    setTimeout(()=>{ if(!done){ clean(); reject(new Error('Google did not answer (timed out)')); } }, 15000);
+  });
 }
 async function fetchSheetMatrix(url, apiKey){
   const {id, published, gid} = parseSheetUrl(url);
   if(!id) throw new Error('That does not look like a Google Sheets link.');
   if(apiKey && !published){
     try{ return await fetchSheetApi(id, gid, apiKey); }
-    catch(e){ try{ return await fetchSheetCsvMatrix(id, gid, published); }catch(e2){ throw new Error('Google Sheets API: '+e.message); } }
+    catch(e){ try{ return await fetchSheetCsvMatrix(id, gid, published, url); }catch(e2){ throw new Error('Google Sheets API: '+plateErrText(e)); } }
   }
-  return fetchSheetCsvMatrix(id, gid, published);
+  try{ return await fetchSheetCsvMatrix(id, gid, published, url); }
+  catch(e){
+    if(published) throw e;                      // published keys can only be read as CSV
+    try{ return await fetchSheetJsonp(id, gid); }  // second route: no CORS involved
+    catch(e2){ throw new Error(e.message + ' Second route also failed: ' + plateErrText(e2) + '.'); }
+  }
 }
 function parsePlateMatrix(m){
   const rows = m.filter(r=>Array.isArray(r) && r.some(c=>String(c==null?'':c).trim()!==''));
   if(!rows.length) return {headers:[], plateCol:0, rows:[]};
-  const headers = rows[0].map(c=>String(c==null?'':c).trim());
+  let headers = rows[0].map(c=>String(c==null?'':c).trim());
   let plateCol = headers.findIndex(h=>/plate/i.test(h));
-  if(plateCol < 0) plateCol = 0;
+  let body = rows.slice(1);
+  if(plateCol < 0){
+    plateCol = 0;
+    const first = normalizePlate(headers[0]);
+    if(/^[A-Z0-9]{5,8}$/.test(first) && /[A-Z]/.test(first) && /\d/.test(first)){   // no header row: the first line is already a plate
+      headers = headers.map((_,i)=> i===0 ? 'Plate No.' : 'Column '+(i+1));
+      body = rows;
+    }
+  }
   const seen = new Set(), data = [];
-  rows.slice(1).forEach(r=>{
+  body.forEach(r=>{
     const cells = headers.map((_,i)=>String(r[i]==null?'':r[i]).trim());
     const plate = normalizePlate(cells[plateCol]);
     if(!plate || seen.has(plate)) return;
@@ -2011,14 +2105,13 @@ function parsePlateMatrix(m){
 }
 // silent = background refresh: no loading flicker, no toast, only redraw when something changed.
 async function loadPlates(silent){
-  const url = (state.plateSheet.url||'').trim();
-  if(!url){ state.plateError = 'Add the Google Sheet link first.'; render(); return; }
+  if(!plateConfigured()){ state.plateError = 'Add the Apps Script link or the Google Sheet link first.'; render(); return; }
   if(state.plateLoading) return;
   state.plateLoading = true;
   if(!silent){ state.plateError = ''; render(); }
   const before = JSON.stringify(state.plateData && state.plateData.rows) + '|' + state.plateError;
   try{
-    const parsed = parsePlateMatrix(await fetchSheetMatrix(url, state.plateSheet.apiKey));
+    const parsed = parsePlateMatrix(await fetchPlateMatrix());
     if(parsed.rows.length===0) throw new Error('No plate numbers found in that sheet.');
     const changed = JSON.stringify(parsed.rows) !== JSON.stringify(state.plateData && state.plateData.rows);
     state.plateData = {headers:parsed.headers, plateCol:parsed.plateCol, rows:parsed.rows, fetchedAt:nowStamp()};
@@ -2037,22 +2130,59 @@ async function loadPlates(silent){
 function startPlatePolling(){
   if(plateTimer) return;
   plateTimer = setInterval(()=>{
-    if(state.currentUser && state.activeTab==='plates' && state.plateSheet.url && !state.plateLoading) loadPlates(true);
+    if(state.currentUser && state.activeTab==='plates' && plateConfigured() && !state.plateLoading) loadPlates(true);
   }, PLATE_POLL_MS);
 }
 function plateAutoRefresh(){
   startPlatePolling();
-  if(!state.plateSheet.url || state.plateLoading) return;
+  if(!plateConfigured() || state.plateLoading) return;
   loadPlates(true);
+}
+// Tells apart "this page cannot reach Google at all" from "Google is reachable but refuses to share the answer with this page".
+async function plateDiagnose(){
+  const script = (state.plateSheet.script||'').trim();
+  const url = (state.plateSheet.url||'').trim();
+  const {id, published, gid} = parseSheetUrl(url);
+  if(!script && !id){ state.plateDiag = {lines:['Add the Apps Script link or a valid Google Sheet link first.'], ok:false}; render(); return; }
+  const g = gid ? '&gid='+gid : '';
+  const target = script ? script + (script.includes('?') ? '&' : '?') + '_=' + Date.now()
+    : (published ? `https://docs.google.com/spreadsheets/d/e/${id}/pub?output=csv${g}&_=${Date.now()}`
+                 : `https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:csv${g}&_=${Date.now()}`);
+  const where = [];
+  try{ where.push(window.top!==window.self ? 'embedded inside another page (an iframe or preview)' : 'a normal top-level page'); }catch(e){ where.push('embedded inside another page (an iframe or preview)'); }
+  where.push('address starts with ' + (location.protocol || 'unknown'));
+  let cors = '', noCors = false, ok = false;
+  try{ const r = await fetch(target); if(r.ok){ ok = true; } else { cors = 'Google answered HTTP ' + r.status; } }catch(e){ cors = plateErrText(e); }
+  if(!ok){ try{ await fetch(target, {mode:'no-cors'}); noCors = true; }catch(e){ noCors = false; } }
+  const lines = ['This page is running as: ' + where.join(', ') + '.'];
+  if(ok && script){
+    try{ const v = await fetchSheetScript(script); lines.push(`Result: the Apps Script answered with ${v.length} row(s). The connection works — press Refresh now.`); }
+    catch(e){ lines.push('Result: Google answered, but ' + plateErrText(e) + '.'); ok = false; }
+  } else if(ok) lines.push('Result: Google answered and the page was allowed to read it. The connection works — press Refresh now.');
+  else if(cors.startsWith('Google answered')) lines.push('Result: ' + cors + '. ' + (script ? 'Re-deploy the script as a Web app (Who has access: Anyone) and use the link ending in /exec.' : 'The link is reachable but is not published/shared correctly. Open it in a new tab: it should show the plate list as plain text.'));
+  else if(noCors){
+    lines.push('Result: Google is reachable, but it does not allow this page to read the answer (a browser CORS rule).');
+    lines.push(script ? 'Open the Apps Script link in a new tab. If it shows {"ok":true,…}, deploy a new version with access "Anyone" and paste the new /exec link. If it asks you to sign in, the access setting is not "Anyone".'
+              : (published ? 'Fix: use an Apps Script link (recommended), or the normal share link of the sheet instead of the published link.'
+                           : 'The app also tried a second route; if that failed too, use an Apps Script link or add a Google API key.'));
+  } else {
+    lines.push('Result: this page is not allowed to make requests to Google at all. This happens in embedded previews (such as a preview panel) and with some browser extensions or firewalls.');
+    lines.push('Fix: download the HTML file and open it directly in your browser (or host it on your own web server), then press Refresh now.');
+  }
+  state.plateDiag = {lines, ok};
+  render();
 }
 async function savePlateUrl(){
   if(state.currentUser.role!=='admin') return;
+  const script = (document.getElementById('plateScript').value||'').trim();
   const url = (document.getElementById('plateUrl').value||'').trim();
   const apiKey = (document.getElementById('plateKey').value||'').trim();
+  if(script && !/^https:\/\/script\.google(usercontent)?\.com\//.test(script)){ pushToast('The Apps Script link should start with https://script.google.com/macros/s/…', 'err'); return; }
   if(url && !parseSheetUrl(url).id){ pushToast('That does not look like a Google Sheets link.', 'err'); return; }
-  state.plateSheet = {url, apiKey};
+  state.plateSheet = {url, apiKey, script};
+  state.plateDiag = null;
   await storageSet('st:platesheet', state.plateSheet);
-  if(url) await loadPlates(false); else { state.plateData = null; await storageSet('st:platedata', null); render(); }
+  if(script || url) await loadPlates(false); else { state.plateData = null; await storageSet('st:platedata', null); render(); }
 }
 function updatePlateFilter(key, val){ state.plateFilters[key] = val; render(); }
 function plateUsage(){
@@ -2080,7 +2210,8 @@ function renderPlatesTab(){
   rows.sort((a,b)=>a.plate.localeCompare(b.plate, undefined, {numeric:true}));
   const shown = rows.slice(0, LIMIT);
   const extra = d ? d.headers.map((h,i)=>({h,i})).filter(x=>x.i!==d.plateCol) : [];
-  const hasUrl = !!state.plateSheet.url;
+  const hasUrl = plateConfigured();
+  const checkLink = (state.plateSheet.script||'').trim() || state.plateSheet.url || '';
   const t = x => x ? x.toLocaleTimeString() : '';
   const live = !hasUrl ? '<span class="badge badge-noquota">Not connected</span>'
     : state.plateError ? '<span class="badge badge-assigned" style="background:var(--danger-bg,#fde8e8);color:var(--danger);">● Connection problem</span>'
@@ -2090,7 +2221,7 @@ function renderPlatesTab(){
     <div class="topbar">
       <div>
         <h1 class="page-title">Available Plates</h1>
-        <p class="page-sub">Plate numbers read live from the connected Google Sheet. Plates already on an active lock are marked In use.</p>
+        <p class="page-sub">Plate numbers read live from the connected Google Sheet (through an Apps Script link when set). Plates already on an active lock are marked In use.</p>
       </div>
       <div class="action-row">
         <button class="btn btn-accent" ${state.plateLoading||!hasUrl?'disabled':''} onclick="loadPlates(false)">${state.plateLoading?'Loading…':'↻ Refresh now'}</button>
@@ -2102,16 +2233,33 @@ function renderPlatesTab(){
         <div>${live}</div>
       </div>
       ${isAdmin ? `
-        <div class="field" style="margin-top:12px;"><label for="plateUrl">Sheet link</label>
+        <div class="field" style="margin-top:12px;"><label for="plateScript">Apps Script web app link <span class="helper-text">(recommended — works with a private sheet)</span></label>
+          <input id="plateScript" placeholder="https://script.google.com/macros/s/…/exec" value="${escapeHtml(state.plateSheet.script||'')}"></div>
+        <details style="margin:-4px 0 12px;"><summary class="helper-text" style="cursor:pointer;">How to create the Apps Script (2 minutes)</summary>
+          <ol class="helper-text" style="margin:8px 0 8px 18px;padding:0;">
+            <li>Open the Google Sheet → <b>Extensions → Apps Script</b>.</li>
+            <li>Delete what is there, paste the code below, and click Save.</li>
+            <li><b>Deploy → New deployment →</b> gear icon → <b>Web app</b>. Execute as <b>Me</b>, Who has access <b>Anyone</b> → Deploy → allow access.</li>
+            <li>Copy the <b>Web app URL</b> (ends in <code>/exec</code>) into the box above and press Save &amp; connect.</li>
+            <li>If you change the code later, use <b>Deploy → Manage deployments → Edit → New version</b>.</li>
+          </ol>
+          <pre style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:10px;overflow:auto;font-size:11.5px;max-height:260px;">${escapeHtml(PLATE_SCRIPT_CODE)}</pre>
+          <button class="btn btn-ghost btn-sm" onclick="copyPlateScript()">Copy code</button>
+        </details>
+        <div class="field"><label for="plateUrl">Sheet link <span class="helper-text">(used if there is no Apps Script link, or as a backup)</span></label>
           <input id="plateUrl" placeholder="https://docs.google.com/spreadsheets/d/…" value="${escapeHtml(state.plateSheet.url||'')}"></div>
         <div class="form-row" style="grid-template-columns:1fr auto;align-items:end;">
           <div class="field" style="margin-bottom:0;"><label for="plateKey">Google API key <span class="helper-text">(optional, steadier connection)</span></label>
             <input id="plateKey" type="password" autocomplete="off" placeholder="AIza…" value="${escapeHtml(state.plateSheet.apiKey||'')}"></div>
           <button class="btn btn-primary" onclick="savePlateUrl()">Save &amp; connect</button>
         </div>
+        <div style="margin-top:10px;"><button class="btn btn-ghost btn-sm" onclick="plateDiagnose()">Diagnose connection</button></div>
+        ${state.plateDiag ? `<div class="assign-info" style="margin-top:10px;${state.plateDiag.ok?'':'border-left:3px solid var(--warning);'}">${state.plateDiag.lines.map(l=>`<div style="margin-bottom:4px;">${escapeHtml(l)}</div>`).join('')}</div>` : ''}
         <p class="helper-text" style="margin-top:8px;">Share the sheet as <b>Anyone with the link can view</b> (or File → Share → Publish to web). The column titled "Plate" is used, otherwise the first column; other columns are shown too. Add <code>#gid=…</code> to the link to read a specific tab. With an API key (Google Cloud → enable Google Sheets API → Credentials), the app reads through the Sheets API instead of the public CSV link.</p>`
-      : `<p class="helper-text" style="margin-top:8px;">${hasUrl ? 'Connected to the Google Sheet set by an admin.' : 'An admin has not connected a Google Sheet yet.'}</p>`}
-      ${state.plateError ? `<p class="helper-text" style="color:var(--danger);margin-top:8px;">${escapeHtml(state.plateError)}${d ? ' Showing the last copy from '+fmtDate(d.fetchedAt)+'.' : ''}</p>` : ''}
+      : `<p class="helper-text" style="margin-top:8px;">${hasUrl ? 'Connected to the Google Sheet set by an admin.' : 'An admin has not connected the plate list yet.'}</p>`}
+      ${state.plateError ? `<p class="helper-text" style="color:var(--danger);margin-top:8px;">${escapeHtml(state.plateError)}${d ? ' Showing the last copy from '+fmtDate(d.fetchedAt)+'.' : ''}
+        ${isAdmin && checkLink ? ` <a href="${escapeHtml(checkLink)}" target="_blank" rel="noopener">Open the link in a new tab</a> to check what it returns.` : ''}</p>
+        <p class="helper-text" style="margin-top:4px;">If the link opens fine in a tab but the app still can't read it, the page is probably running somewhere that blocks requests to Google (for example an embedded preview). Open the file directly in your browser or from your own web host.</p>` : ''}
     </div>
     <div class="panel">
       <div class="table-toolbar">
@@ -2126,7 +2274,7 @@ function renderPlatesTab(){
       <div class="table-wrap"><table>
         <thead><tr><th>Plate No.</th>${extra.map(x=>`<th>${escapeHtml(x.h||'—')}</th>`).join('')}<th>Status</th></tr></thead>
         <tbody>
-          ${!d ? `<tr class="empty-row"><td colspan="2">${emptyState('No plate list yet', isAdmin ? 'Paste the Google Sheet link above and press Save & connect.' : 'An admin needs to connect the Google Sheet.')}</td></tr>`
+          ${!d ? `<tr class="empty-row"><td colspan="2">${emptyState('No plate list yet', isAdmin ? 'Add the Apps Script link (or the Google Sheet link) above and press Save & connect.' : 'An admin needs to connect the Google Sheet.')}</td></tr>`
             : shown.length===0 ? `<tr class="empty-row"><td colspan="${extra.length+2}">${emptyState('No matching plates', 'Try clearing the search or filter.')}</td></tr>`
             : shown.map(r=>`<tr>
                 <td class="mono"><b>${escapeHtml(r.plate)}</b></td>
