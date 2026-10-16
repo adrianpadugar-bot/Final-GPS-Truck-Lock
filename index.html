@@ -428,6 +428,7 @@ const ICONS = {
   route: `<svg viewBox="0 0 24 24" fill="none"><circle cx="6" cy="6" r="2.4" stroke="currentColor" stroke-width="1.8"/><circle cx="18" cy="18" r="2.4" stroke="currentColor" stroke-width="1.8"/><path d="M8 7c3 0 2 6 5 6h3" stroke="currentColor" stroke-width="1.8" stroke-dasharray="2.5 2.5"/></svg>`,
   users: `<svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="3.2" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 20c.7-3.6 3-5.5 5.5-5.5s4.8 1.9 5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 5.5c1.6.3 2.8 1.7 2.8 3.4 0 1.7-1.2 3.1-2.8 3.4M17.5 14.7c2 .5 3.4 2.2 4 4.9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
   logout: `<svg viewBox="0 0 24 24" fill="none"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M16 17l5-5-5-5M21 12H9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  plate: `<svg viewBox="0 0 24 24" fill="none"><rect x="3" y="7" width="18" height="10" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M7 11h2m2 0h2m2 0h1M7 14h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
   repo: `<svg viewBox="0 0 24 24" fill="none"><rect x="3.5" y="4" width="17" height="5" rx="1.2" stroke="currentColor" stroke-width="1.8"/><path d="M5 9v9a1.5 1.5 0 001.5 1.5h11A1.5 1.5 0 0019 18V9M9.5 13h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
   inbox: `<svg viewBox="0 0 24 24" fill="none"><path d="M4 13l2.5-7h11L20 13v5a1 1 0 01-1 1H5a1 1 0 01-1-1v-5z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 13h4l1 2h6l1-2h4M12 4v6m0 0l-2.5-2.5M12 10l2.5-2.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   ret: `<svg viewBox="0 0 24 24" fill="none"><path d="M9 7L4 12l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 12h10a6 6 0 010 12" transform="translate(0 -5)" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
@@ -450,6 +451,11 @@ let state = {
   assignForm: { dest:'', agency:'', lockId:'', plate:'' },
   returnForm: { lockId:'', choice:'', plate:'' },
   txlogs: [],
+  plateSheet: {url:'', apiKey:''},
+  plateData: null,
+  plateLoading: false,
+  plateError: '',
+  plateFilters: {search:'', use:'all'},
   destGeo: {},
   mapMetric: 'all',
   mapView: {cx:260, cy:390, z:1},
@@ -553,6 +559,11 @@ async function initApp(){
     await storageSet('st:txlogs', txlogs);
   }
   state.txlogs = txlogs;
+  let plateSheet = await storageGet('st:platesheet');
+  state.plateSheet = (plateSheet && typeof plateSheet==='object' && !Array.isArray(plateSheet)) ? plateSheet : {url:'', apiKey:''};
+  startPlatePolling();
+  let plateData = await storageGet('st:platedata');
+  state.plateData = (plateData && Array.isArray(plateData.rows)) ? plateData : null;
   let destGeo = await storageGet('st:destgeo');
   state.destGeo = (destGeo && typeof destGeo==='object' && !Array.isArray(destGeo)) ? destGeo : {};
   state.routes = routes;
@@ -599,6 +610,7 @@ const MODULES = [
   {id:'dashboard',  label:'Dashboard',            icon:ICONS.dash},
   {id:'locks',      label:'Truck Lock Assigning', icon:ICONS.lock},
   {id:'receive',    label:'Truck Lock to Receive', icon:ICONS.inbox, roles:['admin','destination','origin']},
+  {id:'plates',     label:'Available Plates',     icon:ICONS.plate, roles:['admin','origin']},
   {id:'return',     label:'Return to Origin',     icon:ICONS.ret},
   {id:'allocation', label:'Allocation',           icon:ICONS.alloc},
   {id:'repository', label:'Repository',           icon:ICONS.repo},
@@ -778,6 +790,7 @@ function setTab(tab){
   const allowed = userModules(state.currentUser);
   if(tab!=='account' && !allowed.includes(tab)) return;
   state.activeTab = tab;
+  if(tab==='plates') plateAutoRefresh();
   state.selected = new Set();
   state.exportMenuOpen = null;
   render();
@@ -795,6 +808,7 @@ function renderTab(){
     case 'dashboard': return renderDashboard();
     case 'locks': return renderLocksTab();
     case 'receive': return renderReceiveTab();
+    case 'plates': return renderPlatesTab();
     case 'repository': return renderRepositoryTab();
     case 'return': return renderReturnTab();
     case 'allocation': return renderAllocationTab();
@@ -1187,6 +1201,39 @@ function renderPhMap(scoped){
 }
 
 /* ---------------- Dashboard ---------------- */
+// Origin accounts: un-assigned (still usable) locks per destination per agency, from their own origin's allocations.
+function renderOriginUnassigned(){
+  const u = state.currentUser;
+  const rows = state.allocations.filter(a=>sameStr(a.origin, u.origin))
+    .map(a=>{ const used = allocUsedCount(a.destination, a.agency); return {d:a.destination, ag:a.agency, qty:a.qty, used, left:Math.max(a.qty-used,0)}; })
+    .sort((x,y)=>x.d.localeCompare(y.d) || x.ag.localeCompare(y.ag));
+  const tot = rows.reduce((t,r)=>({qty:t.qty+r.qty, used:t.used+r.used, left:t.left+r.left}), {qty:0, used:0, left:0});
+  return `
+    <div class="panel" style="margin-bottom:20px;">
+      <p class="panel-title">Un-assigned Locks per Destination &amp; Agency</p>
+      <p class="panel-sub">Locks from ${escapeHtml(u.origin||'your origin')} that are allocated but not assigned yet, so they can still be used.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Destination</th><th>Agency</th><th>Allocated</th><th>Assigned</th><th>Un-assigned</th></tr></thead>
+        <tbody>
+          ${rows.length===0 ? `<tr class="empty-row"><td colspan="5">${emptyState('No allocations', 'Allocations from your origin will be counted here.')}</td></tr>` : rows.map(r=>`
+            <tr>
+              <td><b>${escapeHtml(r.d)}</b></td>
+              <td>${escapeHtml(r.ag)}</td>
+              <td><span class="qty-num">${r.qty}</span></td>
+              <td><span class="qty-num">${r.used}</span></td>
+              <td><span class="qty-num ${r.left===0?'bal-low':'bal-ok'}">${r.left}</span></td>
+            </tr>`).join('') + `
+            <tr style="background:var(--surface-2);font-weight:700;">
+              <td colspan="2">Total</td>
+              <td><span class="qty-num">${tot.qty}</span></td>
+              <td><span class="qty-num">${tot.used}</span></td>
+              <td><span class="qty-num">${tot.left}</span></td>
+            </tr>`}
+        </tbody>
+      </table></div>
+    </div>`;
+}
+
 function renderDashboard(){
   const isAdmin = state.currentUser.role === 'admin';
   const scoped = visibleLocksBase();
@@ -1276,6 +1323,7 @@ function renderDashboard(){
       <div class="stat-card c-returning"><div class="stat-label">Returning to Origin</div><div class="stat-value">${returning}</div></div>
     </div>
     ${renderPhMap(scoped)}
+    ${isOriginStaff() ? renderOriginUnassigned() : ''}
     <div class="panel" style="margin-bottom:20px;">
       <p class="panel-title">Assigned Destination</p>
       <p class="panel-sub">Truck locks in-transit to each destination, plus the allocated locks not yet assigned (still usable). Once a destination receives a lock, it moves to Received Destination below.</p>
@@ -1891,6 +1939,206 @@ async function receiveLock(id){
     pushToast(`Lock ${l.lockNo} received at ${l.destination}.`, 'ok');
   }
   render();
+}
+
+/* ---------------- Available Plates module (live Google Sheet) ---------------- */
+const PLATE_POLL_MS = 60*1000;
+let plateTimer = null, plateChecked = null;
+function parseSheetUrl(u){
+  const url = String(u||'').trim();
+  const m = url.match(/\/spreadsheets\/d\/(e\/)?([a-zA-Z0-9_-]+)/);
+  const g = url.match(/[?#&]gid=(\d+)/);
+  return {id: m ? m[2] : '', published: !!(m && m[1]), gid: g ? g[1] : ''};
+}
+// Read through the Google Sheets API (steady, needs an API key and a sheet that anyone with the link can view).
+async function fetchSheetApi(id, gid, key){
+  const base = `https://sheets.googleapis.com/v4/spreadsheets/${id}`;
+  const j = async (u)=>{
+    const res = await fetch(u, {cache:'no-store'});
+    const data = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error((data.error && data.error.message) || ('Google returned '+res.status));
+    return data;
+  };
+  const meta = await j(`${base}?fields=sheets.properties(sheetId,title)&key=${encodeURIComponent(key)}`);
+  const sheets = (meta.sheets||[]).map(x=>x.properties);
+  const tab = (gid && sheets.find(x=>String(x.sheetId)===String(gid))) || sheets[0];
+  if(!tab) throw new Error('No tabs found in that spreadsheet.');
+  const vals = await j(`${base}/values/${encodeURIComponent(tab.title)}?majorDimension=ROWS&key=${encodeURIComponent(key)}`);
+  return vals.values || [];
+}
+// Read the sheet as CSV (works for "anyone with the link" or "published to the web" sheets).
+async function fetchSheetCsvMatrix(id, gid, published){
+  const g = gid ? '&gid='+gid : '';
+  const tries = published
+    ? [`https://docs.google.com/spreadsheets/d/e/${id}/pub?output=csv${g}`]
+    : [`https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:csv${g}`, `https://docs.google.com/spreadsheets/d/${id}/export?format=csv${g}`];
+  let lastErr = null;
+  for(const u of tries){
+    try{
+      const res = await fetch(u, {cache:'no-store'});
+      if(!res.ok){ lastErr = new Error('Google returned '+res.status); continue; }
+      const text = await res.text();
+      if(/^\s*<(!doctype|html)/i.test(text)){ lastErr = new Error('The sheet is private. Share it as "Anyone with the link can view" or publish it to the web.'); continue; }
+      const wb = XLSX.read(text, {type:'string'});
+      return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header:1, defval:'', raw:false});
+    }catch(e){ lastErr = e; }
+  }
+  throw lastErr || new Error('Could not reach Google Sheets.');
+}
+async function fetchSheetMatrix(url, apiKey){
+  const {id, published, gid} = parseSheetUrl(url);
+  if(!id) throw new Error('That does not look like a Google Sheets link.');
+  if(apiKey && !published){
+    try{ return await fetchSheetApi(id, gid, apiKey); }
+    catch(e){ try{ return await fetchSheetCsvMatrix(id, gid, published); }catch(e2){ throw new Error('Google Sheets API: '+e.message); } }
+  }
+  return fetchSheetCsvMatrix(id, gid, published);
+}
+function parsePlateMatrix(m){
+  const rows = m.filter(r=>Array.isArray(r) && r.some(c=>String(c==null?'':c).trim()!==''));
+  if(!rows.length) return {headers:[], plateCol:0, rows:[]};
+  const headers = rows[0].map(c=>String(c==null?'':c).trim());
+  let plateCol = headers.findIndex(h=>/plate/i.test(h));
+  if(plateCol < 0) plateCol = 0;
+  const seen = new Set(), data = [];
+  rows.slice(1).forEach(r=>{
+    const cells = headers.map((_,i)=>String(r[i]==null?'':r[i]).trim());
+    const plate = normalizePlate(cells[plateCol]);
+    if(!plate || seen.has(plate)) return;
+    seen.add(plate); cells[plateCol] = plate; data.push(cells);
+  });
+  return {headers, plateCol, rows:data};
+}
+// silent = background refresh: no loading flicker, no toast, only redraw when something changed.
+async function loadPlates(silent){
+  const url = (state.plateSheet.url||'').trim();
+  if(!url){ state.plateError = 'Add the Google Sheet link first.'; render(); return; }
+  if(state.plateLoading) return;
+  state.plateLoading = true;
+  if(!silent){ state.plateError = ''; render(); }
+  const before = JSON.stringify(state.plateData && state.plateData.rows) + '|' + state.plateError;
+  try{
+    const parsed = parsePlateMatrix(await fetchSheetMatrix(url, state.plateSheet.apiKey));
+    if(parsed.rows.length===0) throw new Error('No plate numbers found in that sheet.');
+    const changed = JSON.stringify(parsed.rows) !== JSON.stringify(state.plateData && state.plateData.rows);
+    state.plateData = {headers:parsed.headers, plateCol:parsed.plateCol, rows:parsed.rows, fetchedAt:nowStamp()};
+    if(changed || !silent) await storageSet('st:platedata', state.plateData);
+    state.plateError = '';
+    plateChecked = new Date();
+    if(!silent) pushToast(`${parsed.rows.length} plate number(s) loaded from the sheet.`, 'ok');
+  }catch(e){
+    state.plateError = e.message || 'Could not load the sheet.';
+  }
+  state.plateLoading = false;
+  const after = JSON.stringify(state.plateData && state.plateData.rows) + '|' + state.plateError;
+  if(!silent || before!==after) render();
+}
+// Keeps the list live while the module is open.
+function startPlatePolling(){
+  if(plateTimer) return;
+  plateTimer = setInterval(()=>{
+    if(state.currentUser && state.activeTab==='plates' && state.plateSheet.url && !state.plateLoading) loadPlates(true);
+  }, PLATE_POLL_MS);
+}
+function plateAutoRefresh(){
+  startPlatePolling();
+  if(!state.plateSheet.url || state.plateLoading) return;
+  loadPlates(true);
+}
+async function savePlateUrl(){
+  if(state.currentUser.role!=='admin') return;
+  const url = (document.getElementById('plateUrl').value||'').trim();
+  const apiKey = (document.getElementById('plateKey').value||'').trim();
+  if(url && !parseSheetUrl(url).id){ pushToast('That does not look like a Google Sheets link.', 'err'); return; }
+  state.plateSheet = {url, apiKey};
+  await storageSet('st:platesheet', state.plateSheet);
+  if(url) await loadPlates(false); else { state.plateData = null; await storageSet('st:platedata', null); render(); }
+}
+function updatePlateFilter(key, val){ state.plateFilters[key] = val; render(); }
+function plateUsage(){
+  const map = new Map();
+  state.locks.forEach(l=>{
+    if(!l.plate || (l.status!=='assigned' && l.status!=='received' && l.status!=='returning')) return;
+    const k = normalizePlate(l.plate);
+    if(!map.has(k)) map.set(k, []);
+    map.get(k).push(l);
+  });
+  return map;
+}
+function renderPlatesTab(){
+  const isAdmin = state.currentUser.role==='admin';
+  const d = state.plateData;
+  const f = state.plateFilters;
+  const usage = plateUsage();
+  const LIMIT = 500;
+  let rows = d ? d.rows.map(r=>({cells:r, plate:r[d.plateCol], used: usage.get(r[d.plateCol])||[]})) : [];
+  const total = rows.length, inUse = rows.filter(r=>r.used.length).length;
+  const q = f.search.trim().toLowerCase();
+  if(q) rows = rows.filter(r=>r.cells.join(' ').toLowerCase().includes(q));
+  if(f.use==='free') rows = rows.filter(r=>!r.used.length);
+  if(f.use==='used') rows = rows.filter(r=>r.used.length);
+  rows.sort((a,b)=>a.plate.localeCompare(b.plate, undefined, {numeric:true}));
+  const shown = rows.slice(0, LIMIT);
+  const extra = d ? d.headers.map((h,i)=>({h,i})).filter(x=>x.i!==d.plateCol) : [];
+  const hasUrl = !!state.plateSheet.url;
+  const t = x => x ? x.toLocaleTimeString() : '';
+  const live = !hasUrl ? '<span class="badge badge-noquota">Not connected</span>'
+    : state.plateError ? '<span class="badge badge-assigned" style="background:var(--danger-bg,#fde8e8);color:var(--danger);">● Connection problem</span>'
+    : state.plateLoading ? '<span class="badge badge-noquota">Connecting…</span>'
+    : `<span class="badge badge-received">● Live</span> <span class="helper-text">checked ${t(plateChecked)||'just now'} · refreshes every ${PLATE_POLL_MS/1000} s while this tab is open</span>`;
+  return `
+    <div class="topbar">
+      <div>
+        <h1 class="page-title">Available Plates</h1>
+        <p class="page-sub">Plate numbers read live from the connected Google Sheet. Plates already on an active lock are marked In use.</p>
+      </div>
+      <div class="action-row">
+        <button class="btn btn-accent" ${state.plateLoading||!hasUrl?'disabled':''} onclick="loadPlates(false)">${state.plateLoading?'Loading…':'↻ Refresh now'}</button>
+      </div>
+    </div>
+    <div class="panel" style="margin-bottom:16px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <p class="panel-title" style="margin:0;">Google Sheet connection</p>
+        <div>${live}</div>
+      </div>
+      ${isAdmin ? `
+        <div class="field" style="margin-top:12px;"><label for="plateUrl">Sheet link</label>
+          <input id="plateUrl" placeholder="https://docs.google.com/spreadsheets/d/…" value="${escapeHtml(state.plateSheet.url||'')}"></div>
+        <div class="form-row" style="grid-template-columns:1fr auto;align-items:end;">
+          <div class="field" style="margin-bottom:0;"><label for="plateKey">Google API key <span class="helper-text">(optional, steadier connection)</span></label>
+            <input id="plateKey" type="password" autocomplete="off" placeholder="AIza…" value="${escapeHtml(state.plateSheet.apiKey||'')}"></div>
+          <button class="btn btn-primary" onclick="savePlateUrl()">Save &amp; connect</button>
+        </div>
+        <p class="helper-text" style="margin-top:8px;">Share the sheet as <b>Anyone with the link can view</b> (or File → Share → Publish to web). The column titled "Plate" is used, otherwise the first column; other columns are shown too. Add <code>#gid=…</code> to the link to read a specific tab. With an API key (Google Cloud → enable Google Sheets API → Credentials), the app reads through the Sheets API instead of the public CSV link.</p>`
+      : `<p class="helper-text" style="margin-top:8px;">${hasUrl ? 'Connected to the Google Sheet set by an admin.' : 'An admin has not connected a Google Sheet yet.'}</p>`}
+      ${state.plateError ? `<p class="helper-text" style="color:var(--danger);margin-top:8px;">${escapeHtml(state.plateError)}${d ? ' Showing the last copy from '+fmtDate(d.fetchedAt)+'.' : ''}</p>` : ''}
+    </div>
+    <div class="panel">
+      <div class="table-toolbar">
+        <div class="grow"><input id="plateSearch" class="search-input" placeholder="Search plate number…" value="${escapeHtml(f.search)}" oninput="updatePlateFilter('search', this.value)"></div>
+        <select class="filter-select" onchange="updatePlateFilter('use', this.value)">
+          <option value="all" ${f.use==='all'?'selected':''}>All plates</option>
+          <option value="free" ${f.use==='free'?'selected':''}>Not in use</option>
+          <option value="used" ${f.use==='used'?'selected':''}>In use</option>
+        </select>
+        <span class="helper-text">${d ? `${total} plate(s) · ${total-inUse} free · ${inUse} in use` : ''}</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Plate No.</th>${extra.map(x=>`<th>${escapeHtml(x.h||'—')}</th>`).join('')}<th>Status</th></tr></thead>
+        <tbody>
+          ${!d ? `<tr class="empty-row"><td colspan="2">${emptyState('No plate list yet', isAdmin ? 'Paste the Google Sheet link above and press Save & connect.' : 'An admin needs to connect the Google Sheet.')}</td></tr>`
+            : shown.length===0 ? `<tr class="empty-row"><td colspan="${extra.length+2}">${emptyState('No matching plates', 'Try clearing the search or filter.')}</td></tr>`
+            : shown.map(r=>`<tr>
+                <td class="mono"><b>${escapeHtml(r.plate)}</b></td>
+                ${extra.map(x=>`<td>${escapeHtml(r.cells[x.i]||'')}</td>`).join('')}
+                <td>${r.used.length ? `<span class="badge badge-assigned">In use</span>${isAdmin ? ` <span class="helper-text">${r.used.slice(0,3).map(l=>escapeHtml(l.lockNo)).join(', ')}${r.used.length>3?'…':''}</span>` : ''}` : '<span class="badge badge-available">Free</span>'}</td>
+              </tr>`).join('')}
+        </tbody>
+      </table></div>
+      ${rows.length>LIMIT ? `<p class="helper-text" style="margin-top:8px;">Showing the first ${LIMIT} of ${rows.length}. Use the search to narrow it down.</p>` : ''}
+    </div>
+    ${state.modal ? renderModal() : ''}
+  `;
 }
 
 /* ---------------- Return to Origin module ---------------- */
