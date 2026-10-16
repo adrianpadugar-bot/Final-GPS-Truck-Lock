@@ -711,7 +711,7 @@ function renderShell(){
   const allowedMods = userModules(state.currentUser);
   const tabs = MODULES.filter(m=>allowedMods.includes(m.id)).map(m=>({
     id:m.id, icon:m.icon,
-    label: m.id==='locks' ? (isAdmin ? 'Truck Lock Assigning' : 'My Truck Locks') : m.label
+    label: m.id==='locks' ? ((isAdmin || state.currentUser.role==='origin') ? 'Truck Lock Assigning' : 'My Truck Locks') : m.label
   }));
   if(!allowedMods.includes('settings')) tabs.push({id:'account', label:'My Account', icon:ICONS.users});
 
@@ -825,11 +825,20 @@ function renderUsageChart(scoped){
 function renderDashboard(){
   const isAdmin = state.currentUser.role === 'admin';
   const scoped = visibleLocksBase();
-  const total = scoped.length;
-  const available = scoped.filter(l=>l.status==='available').length;
+  const unused = isOriginStaff()
+    ? state.locks.filter(l=>{ if(l.status!=='available') return false; const r = reservationOf(l.id); return !r || sameStr(r.origin, state.currentUser.origin); }).length
+    : scoped.filter(l=>l.status==='available').length;
   const assigned = scoped.filter(l=>l.status==='assigned').length;
   const received = scoped.filter(l=>l.status==='received').length;
   const returning = scoped.filter(l=>l.status==='returning').length;
+  const destView = isDestStaff();
+  // Admin: Total Locks = un-used + assigned, Available = un-used + received.
+  // Destination: Total Trucks = received + returning to origin, Available = received only.
+  const total = destView ? received + returning : unused + assigned;
+  const available = destView ? received : unused + received;
+  const totalLabel = destView ? 'Total Trucks' : 'Total Locks';
+  const totalNote = destView ? 'received + return to origin' : 'un-used + assigned';
+  const availNote = destView ? 'received (excl. return to origin)' : 'un-used + received';
 
   // One card per destination for a given status, with an agency breakdown.
   const cardsFor = (status, cls) => {
@@ -895,8 +904,8 @@ function renderDashboard(){
       </div>
     </div>
     <div class="grid-cards">
-      <div class="stat-card c-total"><div class="stat-label">Total Locks</div><div class="stat-value">${total}</div></div>
-      <div class="stat-card c-available"><div class="stat-label">Available</div><div class="stat-value">${available}</div></div>
+      <div class="stat-card c-total"><div class="stat-label">${totalLabel}</div><div class="stat-value">${total}</div><div class="stat-sub">${totalNote}</div></div>
+      <div class="stat-card c-available"><div class="stat-label">${destView ? 'Total Available' : 'Available'}</div><div class="stat-value">${available}</div><div class="stat-sub">${availNote}</div></div>
       <div class="stat-card c-assigned"><div class="stat-label">Assigned / In-transit</div><div class="stat-value">${assigned}</div></div>
       <div class="stat-card c-received"><div class="stat-label">Received / Complete</div><div class="stat-value">${received}</div></div>
       <div class="stat-card c-returning"><div class="stat-label">Returning to Origin</div><div class="stat-value">${returning}</div></div>
@@ -949,8 +958,8 @@ function renderLocksTab(){
   return `
     <div class="topbar">
       <div>
-        <h1 class="page-title">${isAdmin?'Truck Lock Assigning':'My Truck Locks'}</h1>
-        <p class="page-sub">${isAdmin? 'Pick a destination, agency and lock number to assign a truck lock, then track it below.' : `${isOriginStaff() ? 'Locks from' : 'Locks assigned to'} ${escapeHtml(scopeName(state.currentUser))}.`}</p>
+        <h1 class="page-title">${(isAdmin||isOriginStaff())?'Truck Lock Assigning':'My Truck Locks'}</h1>
+        <p class="page-sub">${isAdmin? 'Pick a destination, agency and lock number to assign a truck lock, then track it below.' : (isOriginStaff() ? `Pick a destination, agency and lock number to assign a truck lock from ${escapeHtml(scopeName(state.currentUser))}, then track it below.` : `Locks assigned to ${escapeHtml(scopeName(state.currentUser))}.`)}</p>
       </div>
       <div class="action-row">
         ${isAdmin ? `<button class="btn btn-ghost" onclick="openModal('bulkLocks')">＋ Bulk upload locks</button>` : ''}
@@ -958,7 +967,7 @@ function renderLocksTab(){
       </div>
     </div>
 
-    ${isAdmin ? renderAssignForm() : ''}
+    ${(isAdmin || isOriginStaff()) ? renderAssignForm() : ''}
 
     ${selectedLocks.length>0 ? `
       <div class="panel" style="padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
@@ -1614,13 +1623,18 @@ function eligibleLocksFor(a){
     return r ? r.id===a.id : freeUnreserved>0;
   }).sort(lockSortNo);
 }
+// Admins can assign under any allocation; origin staff only under allocations from their own origin.
+function canAssignUnder(a){
+  const u = state.currentUser;
+  return u.role==='admin' || (u.role==='origin' && sameStr(a.origin, u.origin));
+}
 function assignFormDestinations(){
   const seen = new Map();
-  state.allocations.filter(a=>allocLeft(a)>0).forEach(a=>{ const k=a.destination.toLowerCase(); if(!seen.has(k)) seen.set(k,a.destination); });
+  state.allocations.filter(a=>allocLeft(a)>0 && canAssignUnder(a)).forEach(a=>{ const k=a.destination.toLowerCase(); if(!seen.has(k)) seen.set(k,a.destination); });
   return Array.from(seen.values()).sort((x,y)=>x.localeCompare(y));
 }
 function assignFormAgencies(dest){
-  return state.allocations.filter(a=>a.destination.toLowerCase()===dest.toLowerCase() && allocLeft(a)>0)
+  return state.allocations.filter(a=>a.destination.toLowerCase()===dest.toLowerCase() && allocLeft(a)>0 && canAssignUnder(a))
     .sort((x,y)=>x.agency.localeCompare(y.agency));
 }
 function setAssignField(field, val){
@@ -1654,8 +1668,8 @@ function renderAssignForm(){
   return `
     <div class="panel" style="margin-bottom:16px;">
       <p class="panel-title">Assign a truck lock</p>
-      <p class="panel-sub">Choose the destination, then the agency, then the lock number, and type the plate number.</p>
-      ${dests.length===0 ? `<p class="helper-text" style="color:var(--danger);">No allocation has slots left. Add or extend allocations in the Allocation tab first.</p>` : `
+      <p class="panel-sub">Choose the destination, then the agency, then the lock number, and type the plate number.${isOriginStaff()?` Only allocations from ${escapeHtml(state.currentUser.origin||'your origin')} are listed.`:''}</p>
+      ${dests.length===0 ? `<p class="helper-text" style="color:var(--danger);">${isOriginStaff() ? 'No allocation from your origin has slots left. Ask an admin to add or extend one.' : 'No allocation has slots left. Add or extend allocations in the Allocation tab first.'}</p>` : `
       <div class="assign-grid">
         <div class="field">
           <label for="afDest"><span class="step-n">1</span>Destination</label>
@@ -1699,6 +1713,7 @@ async function submitAssignForm(){
   const lock = state.locks.find(l=>l.id===f.lockId);
   const plate = normalizePlate(f.plate);
   if(!alloc){ pushToast('Select a destination and agency.', 'err'); return; }
+  if(!canAssignUnder(alloc)){ pushToast("You can only assign under allocations from your own origin.", 'err'); return; }
   if(!lock){ pushToast('Select a lock number.', 'err'); return; }
   if(!plate){ pushToast('Enter the truck plate number.', 'err'); return; }
   if(!alloc.origin){ pushToast(`${alloc.agency} → ${alloc.destination} has no origin. Edit the allocation first.`, 'err'); return; }
