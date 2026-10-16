@@ -311,6 +311,37 @@ tbody tr:hover{background:#FAFBFD;}
 .mod-mini{display:flex;flex-wrap:wrap;gap:4px;max-width:360px;}
 .mod-mini .chip{padding:2px 8px;font-size:11.5px;}
 
+.ph-wrap{display:grid;grid-template-columns:minmax(250px,400px) 1fr;gap:18px;align-items:start;}
+@media(max-width:860px){.ph-wrap{grid-template-columns:1fr;}}
+.ph-svg{display:block;width:100%;height:auto;background:var(--surface-2);border-radius:12px;touch-action:none;cursor:grab;user-select:none;}
+.ph-svg.is-drag{cursor:grabbing;}
+.ph-locks,.ph-lbl{display:none;}
+.ph-z3 .ph-agg{display:none;}
+.ph-z3 .ph-locks{display:inline;}
+.ph-z6 .ph-lbl{display:inline;}
+.ph-mapbox{position:relative;}
+.ph-zoom{position:absolute;top:8px;right:8px;display:flex;flex-direction:column;gap:4px;}
+.ph-zoom button{width:30px;height:30px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:16px;font-weight:700;cursor:pointer;line-height:1;}
+.ph-zoom button:hover{background:var(--accent-bg);}
+.ph-hint{position:absolute;left:8px;bottom:8px;font-size:11px;color:var(--text-dim);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:3px 8px;}
+.ph-lk{background:none;border:none;padding:0;font:inherit;font-weight:700;color:var(--accent-dark);cursor:pointer;text-align:left;}
+.ph-lk:hover{text-decoration:underline;}
+.ph-list{max-height:560px;overflow:auto;}
+.ph-list select{max-width:150px;font-size:12px;padding:3px 6px;}
+.ph-legend{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0;}
+
+.ph-wide{grid-template-columns:minmax(300px,1.6fr) minmax(280px,1fr);}
+@media(max-width:860px){.ph-wide{grid-template-columns:1fr;}}
+.ph-sat{height:580px;width:100%;border-radius:12px;overflow:hidden;background:#0b1d2e;}
+.ph-div{background:none;border:none;}
+.ph-pin{position:absolute;left:-12px;top:-12px;display:flex;align-items:center;gap:3px;white-space:nowrap;pointer-events:auto;}
+.ph-pin svg{flex:none;filter:drop-shadow(0 1px 2px rgba(0,0,0,.75));}
+.ph-pill{background:#fff;border:2px solid #1f3a63;border-radius:10px;font:700 11px/14px Inter,system-ui,sans-serif;color:#1c2a3d;padding:0 6px;}
+.ph-dn{position:absolute;left:0;top:26px;transform:translateX(-50%);font:700 11px/14px Inter,system-ui,sans-serif;color:#fff;text-shadow:0 0 3px #000,0 0 3px #000,0 0 5px #000;}
+.ph-lbl-sat{display:none;background:#fff;border:1px solid #9fb0c6;border-radius:4px;font:700 10.5px/14px Inter,system-ui,sans-serif;color:#1c2a3d;padding:0 5px;}
+.ph-sat-z13 .ph-lbl-sat{display:inline-block;}
+.ph-sat-name{position:absolute;transform:translate(-50%,-34px);font:700 11.5px/14px Inter,system-ui,sans-serif;color:#fff;text-shadow:0 0 3px #000,0 0 3px #000,0 0 6px #000;white-space:nowrap;}
+
 /* ---------- Toast ---------- */
 .toast-stack{position:fixed;bottom:22px;right:22px;z-index:200;display:flex;flex-direction:column;gap:8px;}
 .toast{
@@ -416,10 +447,14 @@ let state = {
   filters: { status:'all', destination:'all', agency:'all', search:'' },
   masterFilters: { search:'' },
   allocFilters: { search:'', destination:'all' },
-  usageRange: 'week',
   assignForm: { dest:'', agency:'', lockId:'', plate:'' },
-  returnForm: { lockId:'' },
+  returnForm: { lockId:'', choice:'', plate:'' },
   txlogs: [],
+  destGeo: {},
+  mapMetric: 'all',
+  mapView: {cx:260, cy:390, z:1},
+  mapStyle: 'sat',
+  mapSat: {lat:12.6, lng:122.2, z:6},
   repoFilters: { from:'', to:'', destination:'all', action:'all', search:'', group:'none' },
   receiveRemarks: {},
   receiveFilters: { search:'', destination:'all', type:'all' },
@@ -518,6 +553,8 @@ async function initApp(){
     await storageSet('st:txlogs', txlogs);
   }
   state.txlogs = txlogs;
+  let destGeo = await storageGet('st:destgeo');
+  state.destGeo = (destGeo && typeof destGeo==='object' && !Array.isArray(destGeo)) ? destGeo : {};
   state.routes = routes;
   state.loading = false;
   render();
@@ -655,6 +692,7 @@ function render(){
       }
     }
   }
+  if(state.currentUser && typeof phAfterRender==='function') phAfterRender();
 }
 
 /* ---------------- Login screen ---------------- */
@@ -767,61 +805,388 @@ function renderTab(){
   }
 }
 
-/* ---------------- Dashboard ---------------- */
-function usageBounds(r){
-  const now = new Date();
-  const sod = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const day = 864e5;
-  if(r==='today') return [sod, new Date(+sod+day)];
-  if(r==='yesterday') return [new Date(+sod-day), sod];
-  if(r==='week') return [new Date(+sod-6*day), new Date(+sod+day)];
-  return [new Date(+sod-29*day), new Date(+sod+day)];
+/* ---------------- Philippine map (locks per destination) ---------------- */
+const PH_MAP = {W:520, H:780, k:2679.5421076303287, tx:-5435.359195293714, ty:1006.9174425849253, d:'M228.1,120.6L235.3,123.2L251.2,132.4L256.9,134.7L262.9,136.4L267.7,136.8L272,134.8L273.7,132.7L277.1,126.9L280.5,126.2L282.6,128.3L284.2,131.1L285,135.1L284,139.4L280.6,143.2L278.6,147.8L277.3,162.9L277.3,167.4L278.4,171.7L281.3,178.6L282.8,180.6L287.2,183.1L288.4,184.9L288.5,188.3L289.2,191.2L292.1,192.3L294.4,193.9L293.6,197.1L292.1,200.4L290.1,208.6L280.8,227.5L280.3,231.6L276.6,239.7L269,241.1L260.3,244.9L255.5,248L251.3,252L249.6,257.2L251,259.6L251.8,262.1L251.8,264.8L250.5,267.1L246.3,272.5L244.6,277.1L242.7,279.1L241.7,281.5L242.1,284.3L243.8,286.8L248.8,297.3L254.4,307.4L255.5,308.6L255.9,310L252.7,312.6L252.8,317.5L253.7,322.4L258.6,334.3L259.2,337.5L260.9,340.1L263.3,342.6L266.1,344.6L273.9,348.1L276.9,348.8L280.1,348.9L280.8,346.6L283.7,345.7L283,343.4L279.6,340.2L279.6,338.5L281.3,337.1L283.5,336.4L288.2,332.9L293.1,330L299.5,330.3L305.7,331.8L310.3,333.4L314,336.5L317.7,341.7L320.4,347.5L320.2,350.3L319.7,353L319.7,355.8L321.7,357.6L327.8,357.7L330.8,353.4L331.3,348.6L329.1,346.8L330.1,344.4L332,342.6L334.7,344.2L337.2,347.2L346.6,350.4L349,350.5L350.8,351.1L355,353.4L357.1,355.2L354.7,359L345.3,359.8L342.6,362.6L345.4,368.3L349.8,372.9L352.7,376.7L355.2,380.8L355.2,384.5L353.7,388.3L357.7,388.1L361.6,388.8L367,392.2L368.7,392.4L370.4,391.9L370.2,403.7L366.5,414.4L361.9,413.1L358.1,408.6L358.7,403L361.3,397.7L359.9,396.5L357.4,397L354.5,398.2L351.3,398.6L346.3,397.9L335.8,392.1L331.5,391.5L330.5,388.9L330.8,383.3L326.6,376.7L325.9,374.3L324.6,372.4L312.1,365.2L310.6,364L306.7,358.2L298,350L295.6,349.2L292.9,348.9L292.1,351L293.3,354.2L293.8,357L293.6,359.9L293.9,362.1L298.1,366.6L298.6,368.8L301.5,374.7L301.8,381.5L298.3,384.3L294.3,381.2L294.1,378.6L293.4,376.2L289.2,370L287.9,368.6L279.8,362.5L273.6,355.8L259.7,348.6L258.2,348.2L255.7,348.8L253.5,349.6L246.8,353.2L244.4,355.6L244.3,359.5L239.5,362.5L233,362.9L227.9,361L223.7,357.2L220.2,357L216,351.1L210.8,350.3L206.4,354.9L205.5,345.8L205.5,336.5L206.7,333.8L208.9,331.5L219.8,321.8L221.2,318.6L220.7,314.4L218.2,311.1L214.3,309L209.7,308.1L206.5,306.2L204,303L202.2,308.6L203.9,316.8L204.2,322.3L202.7,324.3L199.8,324.3L197.1,323.7L195.3,321.8L193.7,316.2L189.9,312.6L188.4,307.3L186.7,306.5L183.1,306.9L180.4,304.5L178.8,298.3L178.4,291.7L176.9,286.2L174.7,280.8L173.5,276.4L171.5,256.6L171.2,254.8L170.2,253.3L167.7,251L165.8,248.3L165.5,246L166,236.3L166.8,234L168.7,232.9L171.4,234.7L173.4,237.1L175.9,238.3L178.3,239.7L182.5,245.5L184.2,246.4L189.4,246.2L192.4,245.5L193.9,243.4L194.8,240.9L194.9,237.9L191.9,229.2L190.9,223L190.9,217.3L191.7,211.6L195.8,202.1L196.3,195.6L195.9,186.7L196.6,181.5L196.4,178.5L194.1,173.8L193.4,168.7L200.3,142.9L202.5,138L204,132.7L204.7,125.9L209.9,124L214.8,121.2L217.3,121.4L219.8,122.1L225.9,120.7ZM51,610.8L46.6,614.2L47.1,610L48.3,606L52.7,597.8L55.9,595.3L61.1,588.9L64.1,585.8L71.2,579.6L77.7,572.8L79.9,572.3L82.3,572.3L84.3,571.5L88.5,567.8L99.1,555.7L108.1,546.7L117.1,535.2L121.5,531.8L122.7,530.6L131,520L133.6,518.5L136.5,517.4L138.5,516L140.4,514.2L143.2,509.5L144.6,504.2L143.7,501.1L142.1,496.7L144.3,490.5L145.8,487.7L151.7,475.3L153.3,472.7L155.7,474.3L156,476.6L154.9,481.8L154.9,484.4L156.2,487.1L154.5,491.5L158.7,503.3L161.9,510.6L162.1,513.1L157.7,517.5L155.2,518.8L149.6,520L147.1,521.3L143.2,524.9L140.7,529.6L140,532.1L138.9,534L127.4,537.2L122.2,539.2L119.7,540.8L118.5,543.4L119.3,547.9L109.7,564.3L106.7,568.5L103.5,572.2L99.5,574.7L93.9,576.3L89.4,579.5L86.3,585.1L82.6,590.1L77.9,593.8L72.9,597.1L68.2,599.6L63.1,601.2L61.6,603.4L60.6,606.1L58.2,607.4L55.7,608.1ZM293.4,460L298.8,462.4L304.2,460.3L309.4,460.9L313.8,464L312.3,466L312.1,468.3L321.7,463.5L324.4,463.7L324.2,468.2L323.7,472L322.5,475.6L320.5,479.9L317.7,483.8L314.1,486.5L309.8,488.2L307.7,489.8L307.1,492.1L307.2,495L306.2,497.6L301.7,498.8L294.6,503.9L279.4,507.2L275.2,509.5L272.5,512.4L269.7,515.1L268,515.7L267.3,514.5L267.2,513.4L269.3,506.5L268.8,503.6L267.8,500.9L268.5,495.4L271.2,490.3L272.5,484.7L273,473.7L275.1,458.7L274.9,456.8L273.4,454.8L267.5,453.1L265.1,451.5L266.3,448.5L268.5,446.5L271.5,446.6L274.2,448.5L283.8,452.4L288.9,455.8ZM323.1,581.2L320,581.7L316.7,581.5L314.5,579.2L310.8,569.1L306.4,566.7L301.3,564.9L298.8,563.3L296.5,561.4L289.4,551.4L288.9,545.3L290.1,541.8L292.2,538.7L294.6,537.8L300.5,537.8L303.5,537.4L310.3,532.7L310.8,530.9L310.8,523.3L310.1,518L308.4,512.9L310.3,510.5L312.6,508.2L315,503.7L315.5,500.5L315.5,497.1L316.1,494.7L318.2,493.5L327.3,489.8L328.9,489.5L340.9,492.9L343.3,498.1L343.4,499.7L341.6,505.4L340.1,509.2L336,515.1L333,521.4L330.8,530.9L329.4,534.1L325.7,540L324.6,543.3L324.6,550.4L323.9,553L323.9,555.6L331.3,567.3L332,569.2L332,571.4L330.6,574L327.6,578.5L325.9,580.1ZM390.6,472.9L393.9,474.6L397.6,473.9L402.2,470.2L407.2,471.5L410.3,477.1L411.8,479.2L412.6,482.8L412.3,491.6L411.1,499.5L412.1,501.1L414.5,502.5L416.5,504.3L418.2,506.6L419.4,509L419.7,515.2L422.7,520.3L423.1,522.3L422.4,524.3L417.5,523.9L417,525.6L417.2,527.9L415.5,526.5L412.6,521.5L409.9,519.4L410.8,527.5L411.6,531.4L411.8,535.3L407.2,532.3L401.7,530.4L400.2,528.9L400.8,523.8L400.7,521.3L398.3,516L401,504.4L401,502L400.5,499.7L398.3,495L394.8,491.1L392.6,491.1L387.2,493.8L384.5,492.9L383,482.1L380.8,471.6L379.3,468.9L378.1,466.1L379.1,463.8L381.3,464.7L384.2,467.5L387.7,469.1L389.4,470.4ZM421.7,416.3L425.1,420.2L425.8,423L425.4,426.2L426.9,427.5L429.6,428L433,429.5L435.5,432.4L434,435.1L434.5,438.9L431.8,443.8L432.2,452.5L433.7,455.3L433.8,458L433.5,461L434.2,463.3L438.2,471.3L439.1,473.9L437.7,476L437.4,478L439.9,478.1L443.4,481.4L445.5,485.8L444.9,486.9L442.1,483.5L439.9,483L430.6,483.9L425.1,482.5L421.4,482.3L417.8,476.6L414.6,475.6L412.1,473L407.9,466.4L406.6,462.6L409.6,458.8L410.4,455.8L410.3,452.8L407.4,453.3L405,452.3L402.2,448.6L401,446.6L398.8,444.7L395.4,440.6L390.4,438.9L388.5,437.8L384.5,434.3L381.8,429.9L378.9,422.2L377.4,414.3L390.2,416.4L403,416L417.5,414.2ZM209.6,370.7L211.9,371.1L219.5,369.6L222.5,370.3L224.6,373.1L227.1,373.9L229.1,375.3L233,372.9L236.7,375.7L240,380.9L244.1,384.6L247.8,387.3L248.6,389.4L246.3,392.8L245.6,396.9L245.9,401.5L248.6,411L247.8,413.6L244.8,417.2L242.7,421.3L242.9,423L242.1,424.3L241.9,427.2L240,426.6L238.5,427L237,428.4L234.5,431.1L230.6,430.3L228.9,429.4L228.4,427L227.3,425.4L225.7,424.4L221.7,420.2L219.8,417.1L219.7,413.7L218.7,410.7L216.6,407.9L214,405.7L212.9,403.8L212.6,401.3L212.4,395.1L208.4,387.4L207.1,385.5L203.5,383.7L200.5,381.2L199.1,378.7L198,374.7L197.1,374.2L194.8,374.4L192.6,373.8L193.1,370.9L195.4,368.8L198.6,368.6L207.2,369.7ZM457.6,569.1L461.3,571.9L466.3,571.2L466.2,578.4L467,580.5L471.5,586.6L472.2,591.6L469.5,596.4L467.5,598.6L463.8,601.9L463.8,603.4L465.3,605.1L470.5,606L474.4,608.7L475.1,616.1L478.8,622L478.6,624.5L477.1,635L477.6,639.4L480.3,643L482.7,644.6L484,646.8L485,652.9L484.8,663.4L484.5,667L482.8,670.5L477.8,678.2L471,684.3L467.3,683.9L466.3,685.7L468.5,691.2L467.7,703.1L466.2,711.3L464,707.1L462.5,702.8L460.9,691.3L459.3,686.1L456.6,681.4L455.4,677.2L452.7,673.2L449,663L446.6,663.6L442.8,666.4L441.9,668.3L441.4,671.2L440.4,673.8L435.9,678L432.2,682.9L429.3,688.4L428.3,693.4L430.8,697.2L433.3,698.8L436.9,702.3L438,703.9L441.9,715.3L441.7,726.8L438.9,731.9L431.8,741.6L426.8,744.6L423.9,743.1L421.7,737.2L421.4,734.9L422.9,729.3L423.1,724.2L421.4,722.5L419.4,722.9L418.7,723.6L414.1,730.2L412.1,731.9L409.3,732.1L407.1,731.7L393.4,725.9L382.3,720.2L373.7,714.8L367.3,706.8L366,700.7L366,694.4L363.1,685.2L362.8,682.1L363.1,679.1L365.8,673.3L369.2,670.5L371.2,668.4L372.7,666.1L373.7,663.1L373.4,660.1L372.2,658.2L366.8,651.5L362.3,647.4L352.7,643.7L350.5,641.7L348.1,640.2L345.4,639.5L342.8,639.5L340.1,640.7L339.2,643L339.6,645.2L339.2,647.4L335.2,659.5L330.1,656.9L325.2,653.8L324.1,651.6L323.4,649L322.5,647.3L321.5,645.7L319.2,649.7L316.5,652.9L313.1,653.8L309.6,653.8L308.4,652.4L307.2,644.7L303.5,642.2L299,642.8L293.4,647L292.4,648.6L291.2,652.3L285.2,662.7L282,670.7L278.4,678.6L276.9,681.1L274.7,682.8L271.5,682.1L268.5,680.2L265.6,675.2L266.7,669.3L269.8,665.6L272.4,661.6L275.6,647.6L275.7,642.6L276.4,640.5L281.6,634.2L286,630.2L288.2,629.4L297.8,627.1L301.7,625.2L307.7,625.2L312.8,624.2L316.8,621.1L317.2,618L316.8,614.7L317.8,612.8L319.3,611L321.4,608.8L323.9,607.2L330.6,606L333,604.6L334.7,602.4L337.4,598.3L340.2,599.3L343.3,600.9L348.8,602.3L353.5,605.7L356.7,611.1L357.2,613.8L358.1,622.6L356.9,624.7L352.2,628.8L354.4,629.3L360.4,625.5L363.6,624L371.2,622L373.1,620.7L374.2,618.8L376.9,613.3L378.9,607.5L380.5,605.1L382.7,603.2L384.8,602.9L392.8,606.9L398,605L399.3,599L400.5,590.3L401.5,587.9L404.4,585.6L407.9,586.3L412.6,589.4L417.2,590.5L418.7,588L420.4,583L422,583L428.1,584.7L433.8,583.6L435.5,577.6L434.3,571.2L429.8,552.6L432.5,548.4L434.8,548.3L440.6,553.3L451.5,559.9L455.2,564ZM334.3,563L332.5,564.2L331.8,561.1L332.3,556.9L335.8,542.1L335,538.4L341.1,530.2L344.8,522.5L350.2,514.3L351,510.1L355.9,502.1L360.4,491L360.3,487.3L361.4,485.5L362.1,482.8L362.1,480.4L365.5,476.2L366.5,479L365.5,484.2L365.6,486.7L366.2,487.9L366.2,492.9L365,500.4L366.2,509L364,517.9L361.4,521.8L357.9,524.7L353.9,526.4L349.7,530.8L347.1,535.9L346.6,540.6L340.1,556.4ZM266.5,106.8L263.6,110.4L261.9,109.4L263.6,105.9L263.6,104.7L265,102.1L267.5,101.1L269.7,103.8ZM247.8,83.7L248.3,88.1L245.4,88L241.4,85.3L240.9,83.9L241.1,82.8L241.7,81.9ZM268.3,33.8L267.5,34.4L266.1,34.1L267.5,29.3L269.8,28L271.7,28.6ZM264.5,13L262.3,17L260.4,17L260.8,14.8L263.1,10L264,10.1ZM231,722.3L233.5,725.6L236.7,724.7L241.7,725.7L242.7,727.5L242.6,728.6L237.2,731.9L233.7,728.5L227.3,730.9L224.2,729.5L220.2,730.7L217.7,728L218.7,725.5L225.2,721.3ZM40,637L37.7,640.7L35,636.6L35.2,630.7L36,629.2L40,628.3ZM172.7,513.8L167,515.2L165.6,510.6L169.7,506.4L174.4,508.1L177.1,509.8L175.7,511.3ZM181.3,433.5L183.8,434.3L185.7,433.6L187.4,431L188.9,434.8L192.6,437.8L191.4,441L188,441.3L184.8,440.7L181.3,441.9L177.1,441.2L174.7,438.3L171.9,433L170.3,432L170.5,429.9L171.5,428.5L171,428.2L171.4,427.2L171.9,426.5L172.7,426.3L174.9,428.6L180.3,432.1ZM178.4,455.8L174.9,457.3L174.1,456.3L173.5,454L173.5,452.4L170.2,443.7L172.7,442.5L174.6,443.5L176.6,444.8L178.3,445.6L179.9,448.2L179.6,450.1L180.1,451.9ZM300.5,514.4L299.3,515.1L298.1,514.9L295.4,516.6L294.4,513.4L295.3,508L299.5,503.8L300.5,502.5L301.7,501.7L303,501.6L304.4,503.3L304.7,505.7L302,513.2ZM391.6,547L391.1,548.7L387.4,548.6L386,548.8L382.7,553.3L380.6,554.4L369.5,555.9L360.8,554.7L357.7,552.3L355.7,548.2L355.2,545.5L357.4,542.6L359.4,540.6L366.5,536.9L368.2,534L371.9,530.4L379.5,529.3L380.1,530.2L381.1,530.7L382.7,530.8L386.5,533.7L390.7,535.6L389.7,542.6L390.9,544.9ZM188.4,760.7L187.2,763.6L185.7,764.9L183.6,764.1L182.1,762.7L181.3,764.9L177.2,765.7L174.7,769L170.9,770L168.3,769.5L168.7,766.5L175.9,762.1L180.4,760.4L184.3,757.2L186.3,756.8L187.4,759.5ZM274.6,705.6L269.8,706.3L268.3,706.3L264.6,701.5L264.3,699.3L261.3,697L262.3,694.6L266.1,694L272.9,690.9L283.7,695.7L285.3,697.4L282,698.5L279.6,703.1ZM460.1,548L459.4,548.2L456.9,544.5L457.2,540.3L460.8,534.1L463.3,539.6L463.3,542L463,543.3L465.3,546.3L463.6,547.9ZM442.8,540.9L441.9,542.2L440.9,539.5L438,536.9L435.5,532.6L433.7,531.2L434.8,527.8L435,522.2L437.7,519.6L438.9,518.8L440.7,516.1L441.7,515.9L442.6,518.2L440.7,525.2L443.4,533.5L442.4,538.6L442.9,539.7ZM189.4,357.5L189.4,360.8L181.5,356L181.3,354.4L181.5,353.2L182.3,352.4L186.5,354.2ZM266.1,367.7L269.2,367.8L270,367.4L275.6,371.4L275.2,373.4L275.9,376.2L272.7,380.8L272.2,382.3L270.4,383.8L264.5,380.2L262.3,377.9L261.6,373.2L264,366.5ZM274.6,424.6L270.9,436.5L268.3,432.4L269.3,429.9L267.2,427.7L266.7,425.7L267.5,423.1L269.7,420.7L270.2,412.9L275.1,410.4L276.9,410.3L276.2,412.2L276.4,415.8ZM300.8,426.8L298.5,427.9L293.6,423.2L290.7,421.1L290.1,419.8L292.2,418.1L298.5,418.1L301.7,421.3L302.2,423.3ZM330.1,400.7L334.2,408L329.8,403L324.7,399.6L319.5,394L315.6,392L314.6,390.8L315,388.5L317.8,388.1L319,388.3L326.6,398.2ZM353.2,419.8L353.4,424L351.7,422.5L345.9,414.2L344.4,411.2L345.9,409.2L350.2,412.3ZM350.5,427.8L359.4,433.5L365.6,443.1L366.3,450.5L365.8,453.4L363,450.2L356.6,445.7L352.2,444.7L350.8,443.9L351.3,441.4L348.5,439.2L348.1,438.3L345.6,437.3L341.7,432.2L339,431.2L336.5,432.3L330.6,439.8L324.4,445.1L324.2,443.1L326.8,436.5L328.4,425.9L329.4,422.6L328.1,417.9L327.9,413.7L332.6,415.6L338.5,417.6L343.1,420.3L343.8,422.1ZM380.3,363.3L378.9,366.4L377.4,365.3L375.4,365.5L371.9,368.1L366.3,364.6L365.5,361.8L369.5,355.7L369.5,346.6L370.9,344.3L372.4,342.7L374.2,341.8L378.1,348.1L379.5,348.9L383.2,351.8L382.3,357.6L382.7,361ZM278.4,343.2L278.3,345.2L268.2,338L267.7,336.8L267.7,335.7L268.3,334.5ZM271.7,297L272.5,298.7L271.7,298.6L271,299L268.8,302.4L271.2,308.9L269.7,313.6L267,313.9L266,313.4L266.5,311.1L267.2,310L266.7,306.9L265,305L263.8,301.3L261.8,299L262.8,295.4L268.8,295ZM378.4,508.1L377.3,508.3L379.5,503.3L381.1,504L381.6,504.5L381.6,506.8ZM423.6,537.7L423.9,540.1L418,533.9L416.7,529.5L418.7,529.7L421.4,531.3ZM314,659.4L314.5,660.6L314.3,661.7L309.4,663.9L307.9,663.8L307.4,660.2L308.6,658.5L310.9,660L312.9,658.3ZM447.1,680.5L446.5,683.1L443.6,676.8L442.4,675.3L443.9,670L447.1,672.6ZM392.2,465.8L386.4,466.1L383.8,464L380.6,457.5L384.2,456.2L387.7,456.5L390.2,458.7L392.8,463.1ZM401.5,577.5L400.2,580.3L394.9,578L393.6,576L394.3,573.6L396.8,572.8L398.1,572.8L400.7,575.3ZM235.2,97.5L235,100.9L232.6,99.1L232.1,96.6L232.3,94.8L233.3,92.5L234.8,94.5ZM170.2,464.2L171.2,466.8L169.8,470.6L168.7,471.4L167.3,469.8L163.9,468.7L163.8,466.7L165.5,466.7L168.5,464.7ZM352.3,475.8L355,482.1L351.3,482.1L350,477.5L351.7,476ZM284.7,416.2L283.3,417.7L282.5,417.5L281.8,414.9L283.1,413.2L283.7,413.3ZM455.9,556.1L455,557.4L453.7,554.8L454.9,549.2L455.7,548.3L456.9,551.9ZM403.7,460.9L402.9,463.4L401.5,462.7L400.3,461.6L398.5,457.9L398,455.2L400.7,456.7L402.2,459.4ZM53,621.4L49.8,622.5L49.1,619.6L49.5,616.7L51.8,617L52.8,617.9ZM349.7,573L350,577.9L345.8,579.4L342.2,578.1L340.1,575.1L340.1,574.1L341.9,574.2L346.3,571.6L347.6,571Z'};
+// Label; aliases (matched inside destination names); latitude; longitude
+const PH_PLACES = (`
+Manila;manila,metro manila,ncr,national capital region;14.5995;120.9842
+Quezon City;quezon city,qc;14.6760;121.0437
+Caloocan;caloocan;14.6507;120.9667
+Makati;makati;14.5547;121.0244
+Pasig;pasig;14.5764;121.0851
+Taguig;taguig;14.5176;121.0509
+Valenzuela;valenzuela;14.7011;120.9830
+Mandaluyong;mandaluyong;14.5794;121.0359
+Paranaque;paranaque;14.4793;121.0198
+Las Pinas;las pinas;14.4445;120.9939
+Muntinlupa;muntinlupa,alabang;14.4081;121.0415
+Pasay;pasay;14.5378;121.0014
+Marikina;marikina;14.6507;121.1029
+Malabon;malabon;14.6625;120.9569
+Navotas;navotas;14.6667;120.9417
+San Juan City;san juan;14.6019;121.0355
+Laguna (Calamba);laguna,calamba,santa rosa,san pablo,binan;14.2117;121.1653
+Cavite (Imus);cavite,imus,bacoor,dasmarinas,general trias;14.4297;120.9367
+Batangas;batangas;13.7565;121.0583
+Lipa;lipa;13.9411;121.1631
+Rizal (Antipolo);rizal,antipolo,cainta,taytay;14.5860;121.1760
+Bulacan (Malolos);bulacan,malolos,meycauayan,san jose del monte;14.8527;120.8160
+Pampanga (San Fernando);pampanga,san fernando;15.0286;120.6898
+Angeles;angeles,clark;15.1450;120.5887
+Tarlac;tarlac;15.4755;120.5963
+Dagupan (Pangasinan);pangasinan,dagupan,lingayen;16.0433;120.3339
+Urdaneta;urdaneta;15.9758;120.5711
+La Union (San Fernando);la union;16.6159;120.3209
+Baguio;baguio,benguet;16.4023;120.5960
+Laoag (Ilocos Norte);ilocos norte,laoag;18.1978;120.5936
+Vigan (Ilocos Sur);ilocos sur,vigan;17.5747;120.3869
+Tuguegarao (Cagayan);cagayan valley,tuguegarao;17.6132;121.7270
+Cauayan (Isabela);isabela,cauayan;16.9250;121.7700
+Santiago;santiago;16.6877;121.5486
+Cabanatuan (Nueva Ecija);nueva ecija,cabanatuan;15.4860;120.9700
+Bayombong (Nueva Vizcaya);nueva vizcaya,bayombong;16.4823;121.1500
+Olongapo;zambales,olongapo,subic;14.8386;120.2842
+Balanga (Bataan);bataan,balanga;14.6760;120.5360
+Baler (Aurora);aurora,baler;15.7580;121.5610
+Lucena (Quezon);lucena;13.9370;121.6170
+Naga (Camarines Sur);camarines sur,naga;13.6218;123.1948
+Daet (Camarines Norte);camarines norte,daet;14.1100;122.9550
+Legazpi (Albay);albay,legazpi;13.1391;123.7438
+Sorsogon;sorsogon;12.9740;124.0060
+Masbate;masbate;12.3700;123.6200
+Virac (Catanduanes);catanduanes,virac;13.5840;124.2380
+Calapan (Oriental Mindoro);mindoro,calapan;13.4119;121.1803
+San Jose (Occidental Mindoro);occidental mindoro;12.3520;121.0690
+Puerto Princesa (Palawan);palawan,puerto princesa;9.7392;118.7353
+Boac (Marinduque);marinduque,boac;13.4470;121.8420
+Romblon;romblon;12.5780;122.2700
+Basco (Batanes);batanes,basco;20.4487;121.9720
+Bangued (Abra);abra,bangued;17.5950;120.6160
+Tabuk (Kalinga);kalinga,tabuk;17.4090;121.4440
+Lagawe (Ifugao);ifugao,lagawe;16.7960;121.1190
+Bontoc (Mountain Province);mountain province,bontoc;17.0900;120.9770
+Iloilo;iloilo;10.7202;122.5621
+Bacolod (Negros Occidental);bacolod,negros occidental;10.6713;122.9511
+Dumaguete (Negros Oriental);dumaguete,negros oriental;9.3068;123.3054
+Cebu;cebu;10.3157;123.8854
+Mandaue;mandaue;10.3236;123.9223
+Lapu-Lapu;lapu lapu,mactan;10.3103;123.9494
+Tagbilaran (Bohol);bohol,tagbilaran;9.6500;123.8500
+Tacloban (Leyte);tacloban,leyte;11.2543;124.9630
+Ormoc;ormoc;11.0059;124.6075
+Catbalogan (Samar);samar,catbalogan;11.7753;124.8861
+Calbayog;calbayog;12.0670;124.5960
+Catarman (Northern Samar);northern samar,catarman;12.4990;124.6370
+Borongan (Eastern Samar);eastern samar,borongan;11.6070;125.4310
+Naval (Biliran);biliran,naval;11.5600;124.4000
+Roxas (Capiz);capiz,roxas;11.5853;122.7511
+Kalibo (Aklan);aklan,kalibo;11.7060;122.3660
+Boracay;boracay;11.9674;121.9248
+San Jose de Buenavista (Antique);antique;10.7450;121.9420
+Jordan (Guimaras);guimaras;10.6600;122.6000
+Siquijor;siquijor;9.2000;123.5150
+Maasin (Southern Leyte);southern leyte,maasin;10.1330;124.8330
+Davao;davao;7.1907;125.4553
+Digos (Davao del Sur);davao del sur,digos;6.7500;125.3570
+Tagum (Davao del Norte);tagum,davao del norte;7.4478;125.8078
+Mati (Davao Oriental);davao oriental,mati;6.9553;126.2170
+Nabunturan (Davao de Oro);davao de oro,compostela valley,nabunturan;7.6060;125.9680
+Cagayan de Oro;cagayan de oro,cdo,misamis oriental;8.4542;124.6319
+General Santos;general santos,gensan;6.1164;125.1716
+Alabel (Sarangani);sarangani,alabel;6.1000;125.2900
+Zamboanga;zamboanga;6.9214;122.0790
+Butuan (Agusan del Norte);butuan,agusan;8.9475;125.5406
+Cotabato City;cotabato city,maguindanao;7.2231;124.2452
+Kidapawan (Cotabato);kidapawan,north cotabato;7.0083;125.0894
+Iligan;iligan,lanao del norte;8.2280;124.2452
+Koronadal (South Cotabato);koronadal,south cotabato;6.5030;124.8470
+Pagadian (Zamboanga del Sur);pagadian,zamboanga del sur;7.8257;123.4370
+Surigao;surigao;9.7840;125.4950
+Dipolog (Zamboanga del Norte);dipolog,zamboanga del norte;8.5886;123.3409
+Ozamiz (Misamis Occidental);ozamiz,misamis occidental;8.1481;123.8444
+Malaybalay (Bukidnon);malaybalay,bukidnon;8.1575;125.1278
+Valencia (Bukidnon);valencia;7.9060;125.0940
+Marawi (Lanao del Sur);marawi,lanao del sur;8.0000;124.2900
+Jolo (Sulu);jolo,sulu;6.0500;121.0000
+Bongao (Tawi-Tawi);bongao,tawi tawi;5.0290;119.7730
+Tacurong (Sultan Kudarat);sultan kudarat,tacurong;6.6930;124.6760
+Mambajao (Camiguin);camiguin,mambajao;9.2480;124.7190
+Isabela City (Basilan);basilan;6.7100;121.9710
+`).trim().split('\n').map(line=>{
+  const [label, aliases, lat, lng] = line.split(';');
+  return {label, aliases: aliases.split(','), lat:parseFloat(lat), lng:parseFloat(lng)};
+});
+function phNorm(t){ return ' ' + String(t||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim() + ' '; }
+// Which place a destination sits on: a manual choice wins, otherwise the longest alias found in its name.
+function phAutoPlace(dest){
+  const n = phNorm(dest);
+  let best = null, bestLen = 0;
+  PH_PLACES.forEach(pl=>pl.aliases.forEach(a=>{
+    const an = phNorm(a);
+    if(n.includes(an) && an.length>bestLen){ best = pl; bestLen = an.length; }
+  }));
+  return best;
 }
-function setUsageRange(r){ state.usageRange = r; render(); }
-function renderUsageChart(scoped){
-  const r = state.usageRange;
-  const [from, to] = usageBounds(r);
-  const inR = v => { if(!v) return false; const t = new Date(v); return t>=from && t<to; };
-  const map = new Map();
-  const get = d => { if(!map.has(d)) map.set(d,{d,a:0,r:0}); return map.get(d); };
-  scoped.forEach(l=>{
-    if(!l.destination) return;
-    if(inR(l.assignedAt)) get(l.destination).a++;
-    if(inR(l.receivedAt)) get(l.destination).r++;
+function phPlaceFor(dest){
+  const manual = state.destGeo[dest];
+  if(manual){ const pl = PH_PLACES.find(x=>x.label===manual); if(pl) return pl; }
+  return phAutoPlace(dest);
+}
+function phProject(lat, lng){
+  const phi = lat*Math.PI/180, lam = lng*Math.PI/180;
+  return {x: PH_MAP.tx + PH_MAP.k*lam, y: PH_MAP.ty - PH_MAP.k*Math.log(Math.tan(Math.PI/4 + phi/2))};
+}
+function setMapMetric(m){ state.mapMetric = m; render(); }
+async function setDestPlace(dest, label){
+  if(state.currentUser.role!=='admin') return;
+  if(label) state.destGeo[dest] = label; else delete state.destGeo[dest];
+  await storageSet('st:destgeo', state.destGeo);
+  render();
+}
+// ---- zoom / pan (updates the SVG in place so the rest of the page isn't re-rendered)
+let phDrag = null;
+function phClamp(v){
+  v.z = Math.max(1, Math.min(16, v.z));
+  const vw = PH_MAP.W/v.z, vh = PH_MAP.H/v.z;
+  v.cx = Math.max(vw/2, Math.min(PH_MAP.W - vw/2, v.cx));
+  v.cy = Math.max(vh/2, Math.min(PH_MAP.H - vh/2, v.cy));
+  return v;
+}
+function phViewBox(v){ const vw = PH_MAP.W/v.z, vh = PH_MAP.H/v.z; return `${(v.cx-vw/2).toFixed(2)} ${(v.cy-vh/2).toFixed(2)} ${vw.toFixed(2)} ${vh.toFixed(2)}`; }
+function phScale(v){ return (PH_MAP.W/(400*v.z)).toFixed(4); }   // keeps icons ~constant size on screen
+function phClasses(v){ return 'ph-svg' + (v.z>=3?' ph-z3':'') + (v.z>=6?' ph-z6':''); }
+function phApply(){
+  const svg = document.getElementById('phSvg'); if(!svg) return;
+  const v = state.mapView;
+  svg.setAttribute('viewBox', phViewBox(v));
+  svg.style.setProperty('--ph-s', phScale(v));
+  svg.setAttribute('class', phClasses(v) + (phDrag ? ' is-drag' : ''));
+}
+function phZoomAt(f, mx, my){
+  const v = state.mapView, vw = PH_MAP.W/v.z, vh = PH_MAP.H/v.z;
+  const ux = v.cx - vw/2 + mx*vw, uy = v.cy - vh/2 + my*vh;
+  v.z *= f; v.z = Math.max(1, Math.min(16, v.z));
+  const nvw = PH_MAP.W/v.z, nvh = PH_MAP.H/v.z;
+  v.cx = ux - mx*nvw + nvw/2; v.cy = uy - my*nvh + nvh/2;
+  phClamp(v); phApply();
+}
+function phWheel(e){ e.preventDefault(); const r = e.currentTarget.getBoundingClientRect(); phZoomAt(e.deltaY<0 ? 1.3 : 1/1.3, (e.clientX-r.left)/r.width, (e.clientY-r.top)/r.height); }
+function phZoomBtn(f){ phZoomAt(f, 0.5, 0.5); }
+function phReset(){ state.mapView = {cx:PH_MAP.W/2, cy:PH_MAP.H/2, z:1}; phApply(); }
+function phDown(e){
+  const r = e.currentTarget.getBoundingClientRect(), v = state.mapView;
+  phDrag = {x:e.clientX, y:e.clientY, cx:v.cx, cy:v.cy, w:r.width};
+  try{ e.currentTarget.setPointerCapture(e.pointerId); }catch(err){}
+  phApply();
+}
+function phMove(e){
+  if(!phDrag) return;
+  const v = state.mapView, k = (PH_MAP.W/v.z)/phDrag.w;
+  v.cx = phDrag.cx - (e.clientX-phDrag.x)*k; v.cy = phDrag.cy - (e.clientY-phDrag.y)*k;
+  phClamp(v); phApply();
+}
+function phUp(){ phDrag = null; phApply(); }
+function phFocus(dest){
+  const pl = phPlaceFor(dest); if(!pl) return;
+  if(state.mapStyle==='sat'){
+    if(phSatMap) phSatMap.setView([pl.lat, pl.lng], 14); else state.mapSat = {lat:pl.lat, lng:pl.lng, z:14};
+    const box = document.getElementById('phSat'); if(box && box.scrollIntoView) box.scrollIntoView({block:'nearest', behavior:'smooth'});
+    return;
+  }
+  const {x,y} = phProject(pl.lat, pl.lng);
+  state.mapView = phClamp({cx:x, cy:y, z:Math.max(state.mapView.z, 8)});
+  phApply();
+  const el = document.getElementById('phSvg'); if(el && el.scrollIntoView) el.scrollIntoView({block:'nearest', behavior:'smooth'});
+}
+
+function setMapStyle(m){ state.mapStyle = m; render(); }
+let phSatMap = null, phSatData = null, leafletPromise = null;
+function loadLeaflet(){
+  if(window.L) return Promise.resolve();
+  if(leafletPromise) return leafletPromise;
+  leafletPromise = new Promise((resolve, reject)=>{
+    const css = document.createElement('link');
+    css.rel = 'stylesheet'; css.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css';
+    document.head.appendChild(css);
+    const sc = document.createElement('script');
+    sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js';
+    sc.onload = ()=>resolve();
+    sc.onerror = ()=>{ leafletPromise = null; reject(new Error('leaflet failed to load')); };
+    document.head.appendChild(sc);
   });
-  const rows = Array.from(map.values()).filter(x=>x.a>0||x.r>0).sort((x,y)=>y.a-x.a || y.r-x.r || x.d.localeCompare(y.d));
-  const max = Math.max(1, ...rows.map(x=>Math.max(x.a,x.r)));
-  const totA = rows.reduce((n,x)=>n+x.a,0), totR = rows.reduce((n,x)=>n+x.r,0);
-  const labels = {today:'Today', yesterday:'Yesterday', week:'Last week', month:'Last month'};
-  const fmt = d => d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
-  const last = new Date(+to-1);
-  const rangeText = (r==='today'||r==='yesterday') ? fmt(from) : `${fmt(from)} – ${fmt(last)}`;
-  const w = v => v>0 ? Math.max(2, Math.round(v/max*86)) : 0; // leave room for the value label
+  return leafletPromise;
+}
+function phAfterRender(){
+  const el = document.getElementById('phSat');
+  if(!el) return;
+  if(window.L){ phBuildSat(); return; }
+  el.innerHTML = '<div class="helper-text" style="padding:22px;color:#cfd9e6;">Loading satellite imagery…</div>';
+  loadLeaflet().then(()=>{ if(document.getElementById('phSat')) phBuildSat(); })
+    .catch(()=>{ state.mapStyle = 'outline'; pushToast('Satellite view needs an internet connection. Showing the outline map instead.', 'err'); render(); });
+}
+function phPadIcon(color, size){
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" style="color:${color}">${PH_PADLOCK.replace(' id="phPadlock"','')}</svg>`;
+}
+function phBuildSat(){
+  const el = document.getElementById('phSat');
+  if(!el || !window.L || !phSatData) return;
+  if(phSatMap){ try{ phSatMap.remove(); }catch(e){} phSatMap = null; }
+  el.innerHTML = '';
+  const v = state.mapSat;
+  const map = L.map(el, {minZoom:5, maxZoom:18}).setView([v.lat, v.lng], v.z);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    {maxZoom:18, attribution:'Imagery © Esri, Maxar, Earthstar Geographics'}).addTo(map);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+    {maxZoom:18, opacity:0.95}).addTo(map);
+  const agg = L.layerGroup(), locks = L.layerGroup();
+  const {placed, aggColor, maxV, topNames} = phSatData;
+  const SPACING = 0.006; // degrees between locks of one destination (~650 m)
+  const short = t => t.length>22 ? t.slice(0,21)+'…' : t;
+  placed.forEach(r=>{
+    const lat = r.place.lat, lng = r.place.lng;
+    const size = Math.round(24 + 8*Math.sqrt(r.value/maxV));
+    const tip = `${r.d} — ${r.place.label}: in-transit ${r.assigned}, received ${r.received}, returning ${r.returning}`;
+    L.marker([lat, lng], {title: tip, icon: L.divIcon({className:'ph-div', iconSize:[0,0], html:
+      `<div class="ph-pin">${phPadIcon(aggColor, size)}<span class="ph-pill" style="border-color:${aggColor}">${r.value}</span>${topNames.has(r.d) ? `<span class="ph-dn">${escapeHtml(short(r.d))}</span>` : ''}</div>`})}).addTo(agg);
+    L.marker([lat, lng], {interactive:false, icon: L.divIcon({className:'ph-div', iconSize:[0,0], html:`<div class="ph-sat-name">${escapeHtml(short(r.d))}</div>`})}).addTo(locks);
+    r.shown.forEach((l,i)=>{
+      const ang = i*2.399963, rad = SPACING*Math.sqrt(i);
+      const la = lat + rad*Math.sin(ang), ln = lng + rad*Math.cos(ang)/Math.cos(lat*Math.PI/180);
+      const st = PH_STATUS[l.status], no = String(l.lockNo);
+      const ltip = `${no} — ${r.d} · ${st.label}${l.plate?' · '+l.plate:''}${l.agency?' · '+l.agency:''}`;
+      L.marker([la, ln], {title: ltip, icon: L.divIcon({className:'ph-div', iconSize:[0,0], html:
+        `<div class="ph-pin">${phPadIcon(st.color, 24)}<span class="ph-lbl-sat">${escapeHtml(no)}</span></div>`})}).addTo(locks);
+    });
+  });
+  const sync = ()=>{
+    const z = map.getZoom();
+    if(z >= 11){ if(map.hasLayer(agg)) map.removeLayer(agg); if(!map.hasLayer(locks)) map.addLayer(locks); }
+    else { if(map.hasLayer(locks)) map.removeLayer(locks); if(!map.hasLayer(agg)) map.addLayer(agg); }
+    el.classList.toggle('ph-sat-z13', z >= 13);
+    const c = map.getCenter();
+    state.mapSat = {lat:c.lat, lng:c.lng, z};
+  };
+  map.on('zoomend moveend', sync);
+  sync();
+  phSatMap = map;
+}
+
+const PH_STATUS = {assigned:{label:'In-transit', color:'var(--warning)'}, received:{label:'Received', color:'var(--success)'}, returning:{label:'Returning', color:'#8b5cf6'}};
+const PH_PADLOCK = `<g id="phPadlock"><path d="M8 11V8a4 4 0 018 0v3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><rect x="5" y="11" width="14" height="10.5" rx="2.4" fill="currentColor" stroke="#fff" stroke-width="1.4"/><circle cx="12" cy="15.4" r="1.6" fill="#fff"/><rect x="11.4" y="15.6" width="1.2" height="3.2" fill="#fff"/></g>`;
+function renderPhMap(scoped){
+  const isAdmin = state.currentUser.role==='admin';
+  const metric = state.mapMetric;
+  const METRICS = {
+    all:       {label:'All locks',  color:'var(--navy-3)'},
+    assigned:  {label:'In-transit', color:PH_STATUS.assigned.color},
+    received:  {label:'Received',   color:PH_STATUS.received.color},
+    returning: {label:'Returning',  color:PH_STATUS.returning.color}
+  };
+  const by = new Map();
+  scoped.forEach(l=>{
+    if(!l.destination || !PH_STATUS[l.status]) return;
+    if(!by.has(l.destination)) by.set(l.destination,{d:l.destination, assigned:0, received:0, returning:0, locks:[]});
+    const g = by.get(l.destination); g[l.status]++; g.locks.push(l);
+  });
+  const rows = Array.from(by.values()).map(r=>{
+    const place = phPlaceFor(r.d);
+    const shown = r.locks.filter(l=>metric==='all' || l.status===metric).sort(lockSortNo);
+    return {...r, place, shown, value: shown.length};
+  }).sort((a,b)=>b.value-a.value || a.d.localeCompare(b.d));
+  const placed = rows.filter(r=>r.place && r.value>0);
+  const maxV = Math.max(1, ...placed.map(r=>r.value));
+  const topNames = new Set(placed.slice(0,8).map(r=>r.d));
+  const aggColor = METRICS[metric].color;
+  phSatData = {placed, aggColor, maxV, topNames};
+  const v = state.mapView;
+  const tx = (x,y) => `style="transform:translate(${x.toFixed(2)}px,${y.toFixed(2)}px) scale(var(--ph-s))"`;
+  const D0 = 5.5; // spacing (map units) between locks of one destination
+  const halo = 'paint-order:stroke;stroke:var(--surface-2);stroke-width:3px;';
+  const dests = placed.slice().sort((a,b)=>a.value-b.value).map(r=>{
+    const c = phProject(r.place.lat, r.place.lng);
+    const S = 1 + 0.6*Math.sqrt(r.value/maxV);
+    const tip = `${r.d} — ${r.place.label}: in-transit ${r.assigned}, received ${r.received}, returning ${r.returning}`;
+    const cnt = String(r.value), pillW = 8 + 6.4*cnt.length;
+    const agg = `<g class="ph-agg" ${tx(c.x,c.y)}><title>${escapeHtml(tip)}</title>
+        <g transform="scale(${S.toFixed(2)})" style="color:${aggColor}"><use href="#phPadlock" transform="translate(-9 -9) scale(0.75)"/></g>
+        <rect x="${(10*S+2).toFixed(1)}" y="-8" width="${pillW}" height="16" rx="8" style="fill:#fff;stroke:${aggColor};stroke-width:1.5;"/>
+        <text x="${(10*S+2+pillW/2).toFixed(1)}" y="4" text-anchor="middle" style="font-size:11px;font-weight:700;font-family:inherit;fill:#1c2a3d;">${cnt}</text>
+        ${topNames.has(r.d) ? `<text x="0" y="${(14*S+8).toFixed(1)}" text-anchor="middle" style="font-size:11px;font-weight:700;font-family:inherit;fill:var(--text);${halo}">${escapeHtml(r.d.length>22 ? r.d.slice(0,21)+'…' : r.d)}</text>` : ''}
+      </g>`;
+    const locks = r.shown.map((l,i)=>{
+      const ang = i*2.399963, rad = D0*Math.sqrt(i);
+      const x = c.x + rad*Math.cos(ang), y = c.y + rad*Math.sin(ang);
+      const st = PH_STATUS[l.status];
+      const no = String(l.lockNo), w = 8 + 5.6*no.length;
+      const ltip = `${no} — ${r.d} · ${st.label}${l.plate?' · '+l.plate:''}${l.agency?' · '+l.agency:''}`;
+      return `<g ${tx(x,y)}><title>${escapeHtml(ltip)}</title>
+        <g style="color:${st.color}"><use href="#phPadlock" transform="translate(-9 -9) scale(0.75)"/></g>
+        <g class="ph-lbl"><rect x="10" y="-8" width="${w.toFixed(1)}" height="15" rx="3.5" style="fill:#fff;stroke:#9fb0c6;stroke-width:1;"/>
+        <text x="${(10+w/2).toFixed(1)}" y="3.2" text-anchor="middle" style="font-size:9.5px;font-weight:700;font-family:inherit;fill:#1c2a3d;">${escapeHtml(no)}</text></g></g>`;
+    }).join('');
+    const nameTag = `<text ${tx(c.x,c.y)} x="0" y="-16" text-anchor="middle" style="font-size:11px;font-weight:700;font-family:inherit;fill:var(--text);${halo}">${escapeHtml(r.d.length>22 ? r.d.slice(0,21)+'…' : r.d)}</text>`;
+    return `<g>${agg}<g class="ph-locks">${nameTag}${locks}</g></g>`;
+  }).join('');
+  const notOnMap = rows.filter(r=>!r.place).length;
+  const placeOpts = PH_PLACES.map(p=>p.label).sort((a,b)=>a.localeCompare(b));
+  const listRow = r => {
+    const enc = encodeURIComponent(r.d);
+    const manual = state.destGeo[r.d] || '';
+    const auto = phAutoPlace(r.d);
+    return `<tr>
+      <td>${r.place ? `<button class="ph-lk" title="Zoom to this destination" onclick="phFocus(decodeURIComponent('${enc}'))">${escapeHtml(r.d)}</button>` : `<b>${escapeHtml(r.d)}</b> <span class="badge badge-noquota">Not on map</span>`}</td>
+      <td>${r.assigned}</td><td>${r.received}</td><td>${r.returning}</td>
+      ${isAdmin ? `<td><select onchange="setDestPlace(decodeURIComponent('${enc}'), this.value)" title="Where this destination sits on the map">
+          <option value="">Auto${auto ? ' ('+escapeHtml(auto.label)+')' : ' (not found)'}</option>
+          ${placeOpts.map(l=>`<option value="${escapeHtml(l)}" ${manual===l?'selected':''}>${escapeHtml(l)}</option>`).join('')}
+        </select></td>` : ''}
+    </tr>`;
+  };
+  const legendIcon = c => `<svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:-2px;color:${c}"><use href="#phPadlock"/></svg>`;
   return `
     <div class="panel" style="margin-bottom:20px;">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
         <div>
-          <p class="panel-title">Lock Usage per Destination</p>
-          <p class="panel-sub">${rangeText} · ${totA} assigned, ${totR} received${r==='week'?' (last 7 days)':(r==='month'?' (last 30 days)':'')}</p>
+          <p class="panel-title">Locks per Destination — Philippines</p>
+          <p class="panel-sub">Each padlock is a lock. Zoom in to see the lock number on every padlock, or click a destination in the list to jump to it.</p>
         </div>
-        <div class="seg" role="group" aria-label="Date range">
-          ${Object.keys(labels).map(k=>`<button class="${r===k?'is-on':''}" onclick="setUsageRange('${k}')">${labels[k]}</button>`).join('')}
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <div class="seg" role="group" aria-label="Map style">
+            <button class="${state.mapStyle==='sat'?'is-on':''}" onclick="setMapStyle('sat')">Satellite</button>
+            <button class="${state.mapStyle!=='sat'?'is-on':''}" onclick="setMapStyle('outline')">Outline</button>
+          </div>
+          <div class="seg" role="group" aria-label="Map filter">
+            ${Object.keys(METRICS).map(k=>`<button class="${metric===k?'is-on':''}" onclick="setMapMetric('${k}')">${METRICS[k].label}</button>`).join('')}
+          </div>
         </div>
       </div>
-      <div class="usage-legend"><span><i style="background:var(--warning)"></i>Assigned (used)</span><span><i style="background:var(--success)"></i>Received</span></div>
-      ${rows.length ? `<div class="usage-chart">
-        ${rows.map(x=>`
-          <div class="usage-row" title="${escapeHtml(x.d)}: ${x.a} assigned, ${x.r} received">
-            <div class="usage-name">${escapeHtml(x.d)}</div>
-            <div class="usage-bars">
-              <div class="usage-track" style="width:calc(${w(x.a)}% - 0px)"><div class="usage-bar a" style="width:100%"><span>${x.a}</span></div></div>
-              <div class="usage-track" style="width:calc(${w(x.r)}% - 0px)"><div class="usage-bar r" style="width:100%"><span>${x.r}</span></div></div>
-            </div>
-          </div>`).join('')}
-      </div>` : `<p class="helper-text">No lock usage in this period.</p>`}
+      <div class="usage-legend" style="margin:10px 0 0;">
+        ${Object.keys(PH_STATUS).map(k=>`<span>${legendIcon(PH_STATUS[k].color)} ${PH_STATUS[k].label}</span>`).join('')}
+      </div>
+      ${rows.length===0 ? `<p class="helper-text">No locks are assigned to a destination yet.</p>` : `
+      <div class="ph-wrap ${state.mapStyle==='sat'?'ph-wide':''}" style="margin-top:12px;">
+        ${state.mapStyle==='sat' ? `<div class="ph-mapbox"><div id="phSat" class="ph-sat"></div></div>` : `<div class="ph-mapbox">
+          <svg id="phSvg" class="${phClasses(v)}" viewBox="${phViewBox(v)}" style="--ph-s:${phScale(v)};" role="img" aria-label="Map of the Philippines with a padlock for each lock"
+               onwheel="phWheel(event)" onpointerdown="phDown(event)" onpointermove="phMove(event)" onpointerup="phUp()" onpointercancel="phUp()">
+            <defs>${PH_PADLOCK}</defs>
+            <path d="${PH_MAP.d}" style="fill:var(--surface);stroke:var(--border);stroke-width:1;stroke-linejoin:round;vector-effect:non-scaling-stroke;"/>
+            ${dests}
+          </svg>
+          <div class="ph-zoom"><button onclick="phZoomBtn(1.6)" title="Zoom in">+</button><button onclick="phZoomBtn(1/1.6)" title="Zoom out">−</button><button onclick="phReset()" title="Reset view" style="font-size:12px;">⟲</button></div>
+          <div class="ph-hint">Scroll to zoom · drag to move</div>
+        </div>`}
+        <div>
+          ${notOnMap ? `<p class="helper-text" style="margin:0 0 8px;color:var(--warning);">${notOnMap} destination(s) couldn't be placed from their name.${isAdmin ? ' Pick a location for them in the list.' : ''}</p>` : ''}
+          <div class="ph-list table-wrap"><table>
+            <thead><tr><th>Destination</th><th>In-transit</th><th>Received</th><th>Returning</th>${isAdmin?'<th>Map location</th>':''}</tr></thead>
+            <tbody>${rows.map(listRow).join('')}</tbody>
+          </table></div>
+        </div>
+      </div>`}
     </div>`;
 }
 
+/* ---------------- Dashboard ---------------- */
 function renderDashboard(){
   const isAdmin = state.currentUser.role === 'admin';
   const scoped = visibleLocksBase();
@@ -910,7 +1275,7 @@ function renderDashboard(){
       <div class="stat-card c-received"><div class="stat-label">Received / Complete</div><div class="stat-value">${received}</div></div>
       <div class="stat-card c-returning"><div class="stat-label">Returning to Origin</div><div class="stat-value">${returning}</div></div>
     </div>
-    ${renderUsageChart(scoped)}
+    ${renderPhMap(scoped)}
     <div class="panel" style="margin-bottom:20px;">
       <p class="panel-title">Assigned Destination</p>
       <p class="panel-sub">Truck locks in-transit to each destination, plus the allocated locks not yet assigned (still usable). Once a destination receives a lock, it moves to Received Destination below.</p>
@@ -1532,7 +1897,24 @@ async function receiveLock(id){
 function returnableLocks(){
   return visibleLocksBase().filter(l=>l.status==='received').sort(lockSortNo);
 }
-function setReturnLock(id){ state.returnForm.lockId = id; render(); }
+function setReturnLock(id){ state.returnForm = { lockId:id, choice:'', plate:'' }; render(); }
+// "Same" returns the lock under its current plate straight away; "New" asks for the new plate first.
+async function chooseReturnPlate(choice){
+  if(choice==='same'){ state.returnForm.choice='same'; await submitReturnForm(); return; }
+  state.returnForm.choice = 'new';
+  render();
+  const el = document.getElementById('rtNewPlate'); if(el && el.focus) el.focus();
+}
+function cancelReturnPlate(){ state.returnForm.choice=''; state.returnForm.plate=''; render(); }
+function onReturnPlateInput(el){
+  const pos = el.selectionStart==null ? el.value.length : el.selectionStart;
+  const cleanBefore = normalizePlate(el.value.slice(0,pos));
+  el.value = normalizePlate(el.value);
+  try{ el.setSelectionRange(cleanBefore.length, cleanBefore.length); }catch(e){}
+  state.returnForm.plate = el.value;
+  const btn = document.getElementById('rtSubmitBtn');
+  if(btn) btn.disabled = !el.value;
+}
 function renderReturnTab(){
   const isAdmin = state.currentUser.role === 'admin';
   const canAct = isAdmin || isOriginStaff();
@@ -1574,7 +1956,23 @@ function renderReturnTab(){
           ${detail('Received', sel.receivedAt?fmtDate(sel.receivedAt):'—')}
           ${sel.receivedRemarks ? detail('Receive remarks', escapeHtml(sel.receivedRemarks)) : ''}
         </div>
-        <div style="margin-top:14px;"><button class="btn btn-accent" onclick="submitReturnForm()">Return to origin</button></div>` : ''}
+        <div class="assign-info" style="margin-top:12px;">
+          <div style="font-weight:600;margin-bottom:8px;">Will this lock return with the same plate number${sel.plate?` (<span class="mono">${escapeHtml(sel.plate)}</span>)`:''} or a new one?</div>
+          ${f.choice==='new' ? `
+            <div class="field" style="max-width:300px;margin-bottom:10px;">
+              <label for="rtNewPlate">New plate no.</label>
+              <input id="rtNewPlate" placeholder="e.g. NGT4521" autocomplete="off" value="${escapeHtml(f.plate)}" oninput="onReturnPlateInput(this)">
+              <div class="helper-text">Capital letters, no spaces.</div>
+            </div>
+            <div class="action-row">
+              <button id="rtSubmitBtn" class="btn btn-accent" ${f.plate?'':'disabled'} onclick="submitReturnForm()">Submit</button>
+              <button class="btn btn-ghost" onclick="cancelReturnPlate()">Back</button>
+            </div>` : `
+            <div class="action-row">
+              <button class="btn btn-accent" onclick="chooseReturnPlate('same')">Same plate</button>
+              <button class="btn btn-ghost" onclick="chooseReturnPlate('new')">New plate</button>
+            </div>`}
+        </div>` : ''}
     </div>`}
     <div class="panel">
       <p class="panel-title">Returning to origin</p>
@@ -1601,10 +1999,18 @@ function renderReturnTab(){
 async function submitReturnForm(){
   const l = state.locks.find(x=>x.id===state.returnForm.lockId);
   if(!canReturnLock(l)){ pushToast('Select a lock received by the destination.', 'err'); return; }
-  Object.assign(l, {status:'returning', returnStartedAt: nowStamp()});
-  logTx(l, 'return_started', '');
+  const f = state.returnForm;
+  const oldPlate = l.plate || '';
+  let plate = oldPlate, note = oldPlate ? `Same plate ${oldPlate}` : '';
+  if(f.choice==='new'){
+    plate = normalizePlate(f.plate);
+    if(!plate){ pushToast('Enter the new plate number.', 'err'); return; }
+    note = plate===oldPlate ? `Same plate ${oldPlate}` : `New plate ${oldPlate||'—'} → ${plate}`;
+  }
+  Object.assign(l, {status:'returning', returnStartedAt: nowStamp(), plate});
+  logTx(l, 'return_started', note);
   await storageSet('st:locks', state.locks);
-  state.returnForm.lockId = '';
+  state.returnForm = { lockId:'', choice:'', plate:'' };
   pushToast(`Lock ${l.lockNo} is returning to ${l.origin||'its origin'}.`, 'ok');
   render();
 }
